@@ -33,11 +33,19 @@ var hover_target_sq := -1
 # ---------- UI refs ----------
 var status_label: Label
 var board_grid: GridContainer
+var anim_overlay: Control            ## above board_grid; hosts floating sprites
 var squares: Array = []              ## [Button * 64]
 var ability_bar: HBoxContainer
 var end_label: Label
 var promo_panel: PanelContainer
 var promo_buttons: HBoxContainer
+
+# ---------- animation timing ----------
+const ANIM_MOVE_DURATION   := 0.26
+const ANIM_DAMAGE_DURATION := 0.16
+const ANIM_KILL_DURATION   := 0.24
+const ANIM_HIT_DURATION    := 0.4
+var _animating: bool = false
 
 func _ready() -> void:
     _build_ui()
@@ -89,15 +97,30 @@ func _build_ui() -> void:
     btn_new.pressed.connect(_new_game)
     header.add_child(btn_new)
 
-    # --- Board grid ---
+    # --- Board grid + animation overlay ---
     var board_container := CenterContainer.new()
     root.add_child(board_container)
 
+    ## board_holder is a Control sized exactly to the 8x8 grid. Two
+    ## children, both anchored to fill: the GridContainer with the static
+    ## board, and a transparent overlay that hosts floating animation
+    ## sprites (Labels) above the board. anim_overlay ignores mouse so
+    ## clicks still hit the squares underneath.
+    var board_holder := Control.new()
+    board_holder.custom_minimum_size = Vector2(SQ_SIZE * 8, SQ_SIZE * 8)
+    board_container.add_child(board_holder)
+
     board_grid = GridContainer.new()
+    board_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
     board_grid.columns = 8
     board_grid.add_theme_constant_override("h_separation", 0)
     board_grid.add_theme_constant_override("v_separation", 0)
-    board_container.add_child(board_grid)
+    board_holder.add_child(board_grid)
+
+    anim_overlay = Control.new()
+    anim_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    anim_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    board_holder.add_child(anim_overlay)
 
     squares.resize(64)
     ## Render rank 7 at top so White sits at the bottom on screen.
@@ -397,6 +420,7 @@ func _describe_ability(spec: SpecialAbilityDef) -> String:
 # ============================================================================
 
 func _on_square_clicked(sq: int) -> void:
+    if _animating: return
     if not pending_promo.is_empty(): return
     if _game_over(): return
 
@@ -431,6 +455,7 @@ func _on_square_clicked(sq: int) -> void:
     _render()
 
 func _on_ability_button_clicked(kind: int) -> void:
+    if _animating: return
     if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
         _cancel_ability()
         return
@@ -451,6 +476,7 @@ func _handle_ability_click(sq: int) -> void:
     if not found:
         _cancel_ability()
         return
+    var old_state := state
     var r := Rules.apply_ability(state, {
         "kind": int(ability_ctx["kind"]),
         "target_sq": sq,
@@ -462,6 +488,10 @@ func _handle_ability_click(sq: int) -> void:
     ability_ctx = {}
     selected = -1
     legal_for_selected = []
+
+    _animating = true
+    await _animate_events(old_state, r["events"])
+    _animating = false
     _render()
 
 func _cancel_ability() -> void:
@@ -490,6 +520,7 @@ func _game_over() -> bool:
 # ============================================================================
 
 func _play_move(m: Dictionary) -> void:
+    var old_state := state
     var r := Rules.apply_move(state, m)
     state = r["state"]
     selected = -1
@@ -498,7 +529,179 @@ func _play_move(m: Dictionary) -> void:
     ability_ctx = {}
     hover_target_sq = -1
     last_status = Rules.game_status(state)
+
+    ## Animate based on the events list before snapping to the new layout.
+    ## Static cells still hold the OLD render (we haven't called _render yet)
+    ## so floating sprites in anim_overlay slide over the unchanged board.
+    _animating = true
+    await _animate_events(old_state, r["events"])
+    _animating = false
     _render()
+
+# ============================================================================
+# ANIMATIONS — sprite-based (Tween + transient Labels), no particles.
+# ----------------------------------------------------------------------------
+# Approach: between apply_move and the next _render, the static cells still
+# show the OLD piece layout. We hide the relevant glyphs in those cells and
+# draw floating Labels in anim_overlay that tween into their new positions.
+# When the tween finishes, _render() is called which snaps everything to the
+# new state and wipes the overlay.
+#
+# Event types from Rules.apply_move / apply_ability:
+#   move {from, to}       — piece slides from one square to another
+#   push {from, to}       — same shape; the pushed piece slides
+#   damage {sq}           — surviving target flashes red
+#   kill {sq}             — target scales down + fades to 0 alpha
+#   lightning {target}    — instant FX flash on the struck square
+#   cannonResolved {target: [sq...]} — FX flash on every AOE square
+#   cannonQueued / promote — no animation needed
+# ============================================================================
+
+func _sq_to_pos(sq: int) -> Vector2:
+    var f := sq & 7
+    var r := sq >> 3
+    return Vector2(f * SQ_SIZE, (7 - r) * SQ_SIZE)
+
+func _create_floating_piece(piece: Piece, sq: int) -> Label:
+    var def: PieceDef = state.config.pieces[piece.def_id]
+    var lbl := Label.new()
+    lbl.text = def.glyph
+    lbl.size = Vector2(SQ_SIZE, SQ_SIZE)
+    lbl.position = _sq_to_pos(sq)
+    lbl.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+    lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    lbl.add_theme_font_size_override("font_size", 44)
+    lbl.add_theme_color_override("font_color",
+        Color.WHITE if piece.color == Rules.WHITE else Color(0.07, 0.07, 0.07))
+    lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    anim_overlay.add_child(lbl)
+    return lbl
+
+func _create_fx_label(glyph: String, sq: int, tint: Color) -> Label:
+    var lbl := Label.new()
+    lbl.text = glyph
+    lbl.size = Vector2(SQ_SIZE, SQ_SIZE)
+    lbl.position = _sq_to_pos(sq)
+    lbl.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+    lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    lbl.add_theme_font_size_override("font_size", 50)
+    lbl.modulate = tint
+    lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    anim_overlay.add_child(lbl)
+    return lbl
+
+## Hide the static glyph at sq (so the floating sprite is the only visible
+## copy during animation). Returns the Label so the caller can restore it.
+func _hide_static_glyph(sq: int) -> Label:
+    var btn: Button = squares[sq]
+    var glyph: Label = btn.get_node("Glyph")
+    glyph.modulate = Color(1, 1, 1, 0)
+    return glyph
+
+## The orchestrator. Called between state-update and _render. Awaits the
+## composite Tween before returning so the caller can _render afterward.
+func _animate_events(old_state: GameState, events: Array) -> void:
+    var floats: Array = []          ## transient Labels we created
+    var hidden: Array = []          ## static Glyph Labels we made transparent
+    var floats_by_sq: Dictionary = {}   ## origin_sq -> Label that tracks it
+
+    ## Pass 1 — pre-build floating sprites for every piece that needs to
+    ## relocate (move, push, kill). This way later events (damage flashes)
+    ## can target the floating sprite instead of the static cell.
+    for ev in events:
+        var k = String(ev.get("kind", ""))
+        if k == "move" or k == "push":
+            var from_sq := int(ev["from"])
+            var p = old_state.board[from_sq]
+            if p == null: continue
+            hidden.append(_hide_static_glyph(from_sq))
+            var lbl := _create_floating_piece(p, from_sq)
+            floats.append(lbl)
+            floats_by_sq[from_sq] = lbl
+        elif k == "kill":
+            var sq := int(ev["sq"])
+            var p = old_state.board[sq]
+            if p == null: continue
+            hidden.append(_hide_static_glyph(sq))
+            var lbl := _create_floating_piece(p, sq)
+            floats.append(lbl)
+            floats_by_sq[sq] = lbl
+
+    ## Pass 2 — schedule tweens. set_parallel(true) makes everything run
+    ## simultaneously so the attacker slides while the target gets pushed
+    ## while the damage flash plays.
+    var tween := create_tween().set_parallel(true)
+    var any := false
+    for ev in events:
+        var k = String(ev.get("kind", ""))
+        if k == "move" or k == "push":
+            var from_sq := int(ev["from"])
+            var to_sq := int(ev["to"])
+            if floats_by_sq.has(from_sq):
+                var lbl: Label = floats_by_sq[from_sq]
+                tween.tween_property(lbl, "position", _sq_to_pos(to_sq),
+                    ANIM_MOVE_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+                ## Sense of impact for moves into an enemy square — quick
+                ## scale bump near arrival. (Push events skip this; the
+                ## attacker is the one delivering impact.)
+                if k == "move" and old_state.board[to_sq] != null:
+                    var bump := ANIM_MOVE_DURATION * 0.78
+                    tween.tween_property(lbl, "scale", Vector2(1.18, 1.18), 0.06).set_delay(bump)
+                    tween.tween_property(lbl, "scale", Vector2(1.0, 1.0), 0.08).set_delay(bump + 0.06)
+                any = true
+        elif k == "damage":
+            var sq := int(ev["sq"])
+            var target_lbl: Label = floats_by_sq.get(sq, null)
+            if target_lbl == null:
+                ## Target wasn't already floating — give it a floating clone.
+                var p = old_state.board[sq]
+                if p == null: continue
+                hidden.append(_hide_static_glyph(sq))
+                target_lbl = _create_floating_piece(p, sq)
+                floats.append(target_lbl)
+            tween.tween_property(target_lbl, "modulate", Color(1.6, 0.35, 0.35),
+                ANIM_DAMAGE_DURATION * 0.4)
+            tween.tween_property(target_lbl, "modulate", Color.WHITE,
+                ANIM_DAMAGE_DURATION * 0.6).set_delay(ANIM_DAMAGE_DURATION * 0.4)
+            any = true
+        elif k == "kill":
+            var sq := int(ev["sq"])
+            if floats_by_sq.has(sq):
+                var lbl: Label = floats_by_sq[sq]
+                tween.tween_property(lbl, "scale", Vector2(0.25, 0.25), ANIM_KILL_DURATION)
+                tween.tween_property(lbl, "modulate:a", 0.0, ANIM_KILL_DURATION)
+                any = true
+        elif k == "lightning":
+            var sq := int(ev["target"])
+            var fx := _create_fx_label("⚡", sq, Color(0.85, 0.95, 1.2))
+            floats.append(fx)
+            fx.scale = Vector2(0.3, 0.3)
+            tween.tween_property(fx, "scale", Vector2(2.0, 2.0), ANIM_HIT_DURATION * 0.85).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+            tween.tween_property(fx, "modulate:a", 0.0, ANIM_HIT_DURATION * 0.6).set_delay(ANIM_HIT_DURATION * 0.4)
+            any = true
+        elif k == "cannonResolved":
+            for raw in ev.get("target", []):
+                var sq := int(raw)
+                var fx := _create_fx_label("💥", sq, Color(1.0, 0.7, 0.4))
+                floats.append(fx)
+                fx.scale = Vector2(0.4, 0.4)
+                tween.tween_property(fx, "scale", Vector2(1.7, 1.7), ANIM_HIT_DURATION * 0.7)
+                tween.tween_property(fx, "modulate:a", 0.0, ANIM_HIT_DURATION * 0.5).set_delay(ANIM_HIT_DURATION * 0.5)
+            any = true
+
+    if any:
+        await tween.finished
+    else:
+        await get_tree().process_frame
+
+    ## Cleanup — the static board (rendered after this returns) will show
+    ## the new state with un-hidden glyphs.
+    for f in floats:
+        if is_instance_valid(f): f.queue_free()
+    for g in hidden:
+        if is_instance_valid(g): g.modulate = Color.WHITE
 
 # ============================================================================
 # PROMOTION PICKER
