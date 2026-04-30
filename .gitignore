@@ -1,0 +1,13 @@
+# Claude local config (per-machine)
+.claude/
+
+# Godot 4 editor cache & import data
+godot/.godot/
+godot/.import/
+godot/export.cfg
+godot/export_presets.cfg
+
+# Godot Mono / C# (unused here, but standard)
+godot/.mono/
+godot/data_*/
+godot/mono_crash.*.json

@@ -2,517 +2,271 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Chess</title>
+<title>Chess²</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #1f1f23; color: #eaeaea;
-         display: flex; flex-direction: column; align-items: center; padding: 24px; margin: 0; }
+  /* ---------- Layout / theme ---------- */
+  :root {
+    --bg:#1f1f23; --panel:#2a2a30; --line:#3a3a40; --text:#eaeaea;
+    --light:#ecd9b8; --dark:#a97c5a;
+    --accent:#f6d365; --danger:#d96868; --good:#5fb56a;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text);
+         margin: 0; min-height: 100vh; }
+  .scene { display: none; flex-direction: column; align-items: center;
+           padding: 24px; min-height: 100vh; }
+  .scene.active { display: flex; }
   h1 { margin: 0 0 12px; font-weight: 500; letter-spacing: 1px; }
-  #board { display: grid; grid-template-columns: repeat(8, 64px); grid-template-rows: repeat(8, 64px);
-           border: 3px solid #3a3a40; box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
-  .sq { display: flex; align-items: center; justify-content: center;
-        font-size: 46px; cursor: pointer; user-select: none; position: relative; line-height: 1; }
-  .light { background: #ecd9b8; }
-  .dark  { background: #a97c5a; }
-  .piece-w { color: #fff; text-shadow: 0 0 1px #000, 0 0 1px #000, 0 0 2px #000; }
-  .piece-b { color: #111; }
-  .selected { box-shadow: inset 0 0 0 4px #f6d365; }
-  .legal-move::after  { content: ''; position: absolute; width: 18px; height: 18px;
-                        border-radius: 50%; background: rgba(0,0,0,0.28); }
-  .legal-cap          { box-shadow: inset 0 0 0 4px rgba(220,40,40,0.7); }
-  .in-check           { background: #d96868 !important; }
-  #status { margin-top: 14px; font-size: 18px; min-height: 26px; }
-  #controls { margin-top: 8px; }
-  #promo { display: none; gap: 10px; margin-top: 12px; background: #2a2a30; padding: 8px 14px; border-radius: 8px; }
-  #promo button { font-size: 36px; padding: 4px 10px; cursor: pointer; background: #ecd9b8; border: 1px solid #888; border-radius: 4px; }
-  button { background: #3a3a40; color: #eaeaea; border: 1px solid #555; padding: 6px 14px;
-           border-radius: 4px; cursor: pointer; font-size: 14px; }
+  h2 { margin: 0 0 16px; font-weight: 500; }
+  h3 { margin: 12px 0 8px; font-weight: 500; font-size: 15px; color: #c8c8d0; }
+  button { background: var(--line); color: var(--text); border: 1px solid #555;
+           padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
   button:hover { background: #4a4a52; }
+  button.primary { background: #4a6a8a; border-color: #6a8aaa; }
+  button.primary:hover { background: #5a7a9a; }
+
+  /* ---------- Main menu ---------- */
+  #menu .menu-card { background: var(--panel); padding: 36px 56px; border-radius: 12px;
+                     box-shadow: 0 8px 30px rgba(0,0,0,0.4); text-align: center;
+                     margin-top: 8vh; }
+  #menu h1 { font-size: 56px; margin-bottom: 4px; }
+  #menu .tag { color: #999; margin-bottom: 32px; }
+  #menu .menu-buttons { display: flex; flex-direction: column; gap: 12px; }
+  #menu .menu-buttons button { padding: 14px 22px; font-size: 16px; }
+
+  /* ---------- Game scene ---------- */
+  #game-scene { padding-top: 16px; }
+  #game-header { display: flex; align-items: center; gap: 16px;
+                 width: min(640px, 100%); margin-bottom: 12px; }
+  #game-header button { font-size: 13px; }
+  #status { flex: 1; text-align: center; font-size: 18px; min-height: 24px; }
+
+  #board { display: grid; grid-template-columns: repeat(8, 72px);
+                            grid-template-rows: repeat(8, 72px);
+           border: 3px solid var(--line); box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+  .sq { position: relative; cursor: pointer; user-select: none;
+        display: flex; align-items: center; justify-content: center; }
+  .light { background: var(--light); }
+  .dark  { background: var(--dark); }
+  .selected { box-shadow: inset 0 0 0 4px var(--accent); }
+  .legal-move::after  { content: ''; position: absolute; width: 18px; height: 18px;
+                        border-radius: 50%; background: rgba(0,0,0,0.28); pointer-events: none; }
+  .legal-cap          { box-shadow: inset 0 0 0 4px rgba(220,40,40,0.7); }
+  .in-check           { background: var(--danger) !important; }
+  .ability-source     { box-shadow: inset 0 0 0 4px #5fb56a; }
+  .ability-target-lightning { box-shadow: inset 0 0 0 4px rgba(120,180,255,0.85); }
+  .ability-target-cannon    { box-shadow: inset 0 0 0 4px rgba(255,160,80,0.85); }
+  .cannon-pending::before { content: ''; position: absolute; inset: 4px; border-radius: 4px;
+                            background: rgba(255,160,80,0.25); pointer-events: none; }
+  .cannon-hover::before   { content: ''; position: absolute; inset: 4px; border-radius: 4px;
+                            background: rgba(255,160,80,0.55); pointer-events: none; }
+
+  /* ---------- Pieces (in-square content) ---------- */
+  .piece { position: relative; width: 100%; height: 100%;
+           display: flex; align-items: center; justify-content: center; pointer-events: none; }
+  .glyph { font-size: 50px; line-height: 1; }
+  .piece-w .glyph { color: #fff; text-shadow: 0 0 1px #000, 0 0 1px #000, 0 0 2px #000; }
+  .piece-b .glyph { color: #111; }
+  .glyph.frozen { filter: drop-shadow(0 0 4px #6cf) brightness(0.85) hue-rotate(180deg); }
+
+  .hp { position: absolute; top: 2px; left: 2px;
+        background: rgba(0,0,0,0.6); color: #fff; padding: 1px 4px;
+        font-size: 10px; border-radius: 3px; font-weight: 600; }
+  .hp.hp-low { background: rgba(220,40,40,0.85); }
+  .fx { position: absolute; top: 2px; right: 2px; display: flex; gap: 2px; }
+  .fx > span { font-size: 10px; padding: 1px 3px; border-radius: 3px;
+               background: rgba(0,0,0,0.6); color: #fff; }
+  .fx-burn   { background: rgba(220,80,40,0.8) !important; }
+  .fx-freeze { background: rgba(80,160,220,0.8) !important; }
+  .charge { position: absolute; bottom: 2px; right: 2px;
+            font-size: 10px; padding: 1px 4px; border-radius: 3px; font-weight: 600;
+            background: rgba(0,0,0,0.6); color: #fff; }
+  .charge.charge-ready { background: rgba(95,181,106,0.85); }
+  .charge.charge-cool  { background: rgba(0,0,0,0.6); color: #aaa; }
+
+  /* ---------- Ability bar ---------- */
+  #ability-bar { display: flex; gap: 8px; flex-wrap: wrap;
+                 margin-top: 14px; max-width: 640px; justify-content: center; }
+  .ability-btn { font-size: 14px; padding: 6px 12px; }
+  .ability-btn-active { background: #4a6a8a; border-color: #6a8aaa; }
+  .ability-note { color: #888; font-size: 13px; align-self: center; }
+
+  /* ---------- Promotion picker ---------- */
+  #promo { display: none; gap: 10px; margin-top: 12px; background: var(--panel);
+           padding: 8px 14px; border-radius: 8px; }
+  .promo-btn { font-size: 36px; padding: 4px 10px; cursor: pointer;
+               background: var(--light); color: #111; border: 1px solid #888;
+               border-radius: 4px; }
+
+  /* ---------- End-game overlay (a banner under the board, NOT modal) ---------- */
+  #end-overlay { display: none; margin-top: 14px; padding: 10px 22px;
+                 background: var(--panel); border-radius: 8px; font-size: 18px;
+                 border: 1px solid var(--line); }
+
+  /* ---------- Customize scene ---------- */
+  #customize-scene { padding-top: 16px; }
+  #customize-header { display: flex; align-items: center; width: min(960px, 100%);
+                      margin-bottom: 12px; }
+  #customize-header h2 { flex: 1; }
+  #customize-body { display: flex; gap: 16px; width: min(960px, 100%);
+                    background: var(--panel); border-radius: 8px;
+                    border: 1px solid var(--line); overflow: hidden;
+                    min-height: 600px; }
+  #piece-list { width: 200px; border-right: 1px solid var(--line);
+                overflow-y: auto; }
+  .piece-row { display: flex; gap: 8px; padding: 10px 14px; cursor: pointer;
+               border-bottom: 1px solid var(--line); align-items: center; }
+  .piece-row:hover { background: #34343a; }
+  .piece-row.selected { background: #44445a; }
+  .row-glyph { font-size: 24px; }
+  #editor-pane { flex: 1; padding: 16px 20px; overflow-y: auto; max-height: 80vh; }
+  .editor-section { margin-bottom: 18px; padding-bottom: 14px;
+                    border-bottom: 1px solid var(--line); }
+  .field { display: flex; align-items: center; justify-content: space-between;
+           margin: 6px 0; font-size: 14px; gap: 12px; }
+  .field input[type=text], .field input[type=number], .field select {
+    background: #1f1f23; color: var(--text); border: 1px solid var(--line);
+    border-radius: 3px; padding: 4px 8px; min-width: 80px;
+  }
+  .field-check { justify-content: flex-start; gap: 8px; }
+  .field-check input { transform: scale(1.2); }
+  .summary { font-size: 12px; color: #999; margin-top: 6px; line-height: 1.4; }
+  .editor-footer { display: flex; gap: 8px; flex-wrap: wrap;
+                   margin-top: 12px; padding-top: 12px;
+                   border-top: 1px solid var(--line); }
+  .editor-btn { font-size: 13px; }
+  .reach-grid { display: grid; grid-template-columns: repeat(8, 28px);
+                grid-template-rows: repeat(8, 28px); margin: 4px 0; }
+  .reach-cell { display: flex; align-items: center; justify-content: center;
+                font-size: 18px; }
+  .reach-cell.light { background: #d8c5a4; }
+  .reach-cell.dark  { background: #95684a; }
+  .reach-cell.center { box-shadow: inset 0 0 0 2px var(--accent); color: #fff; }
+  .reach-cell.reach-move::after { content: ''; width: 8px; height: 8px;
+                                  border-radius: 50%; background: rgba(0,0,0,0.5); }
+  .reach-cell.reach-cap { box-shadow: inset 0 0 0 2px rgba(220,40,40,0.7); }
 </style>
 </head>
 <body>
-<h1>Chess</h1>
-<div id="board"></div>
-<div id="status"></div>
-<div id="promo"></div>
-<div id="controls"><button id="reset">New game</button></div>
 
+<!-- ================= Main menu ================= -->
+<div id="menu" class="scene active">
+  <div class="menu-card">
+    <h1>Chess²</h1>
+    <div class="tag">Hot-seat chess with HP, status effects, and per-piece abilities.</div>
+    <div class="menu-buttons">
+      <button id="btn-play"      class="primary">Start Game</button>
+      <button id="btn-customize">Customize Pieces</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Game scene ================= -->
+<div id="game-scene" class="scene">
+  <div id="game-header">
+    <button id="btn-back-to-menu">← Menu</button>
+    <div id="status"></div>
+    <button id="btn-new-game">New game</button>
+  </div>
+  <div id="board"></div>
+  <div id="ability-bar"></div>
+  <div id="promo"></div>
+  <div id="end-overlay"></div>
+</div>
+
+<!-- ================= Customize scene ================= -->
+<div id="customize-scene" class="scene">
+  <div id="customize-header">
+    <h2>Customize Pieces</h2>
+  </div>
+  <div id="customize-body">
+    <div id="piece-list"></div>
+    <div id="editor-pane"></div>
+  </div>
+</div>
+
+<!-- ================= Scripts ================= -->
+<script src="js/engine.js"></script>
+<script src="js/config.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/customize.js"></script>
 <script>
 "use strict";
+// Main shell — scene routing + bootstrap.
 
-// ===========================================================================
-// CONSTANTS / HELPERS
-// ===========================================================================
-
-const GLYPHS = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' };
-
-const KNIGHT_OFFSETS = [[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]];
-const KING_OFFSETS   = [[0,1],[0,-1],[1,0],[-1,0],[1,1],[1,-1],[-1,1],[-1,-1]];
-const ROOK_DIRS      = [[0,1],[0,-1],[1,0],[-1,0]];
-const BISHOP_DIRS    = [[1,1],[1,-1],[-1,1],[-1,-1]];
-
-const fileOf = sq => sq & 7;
-const rankOf = sq => sq >> 3;
-const sqOf   = (f, r) => r * 8 + f;
-const inBounds = (f, r) => f >= 0 && f < 8 && r >= 0 && r < 8;
-const opposite = c => c === 'w' ? 'b' : 'w';
-
-function findKing(board, color) {
-  for (let i = 0; i < 64; i++) {
-    const p = board[i];
-    if (p && p.type === 'k' && p.color === color) return i;
-  }
-  return -1;
+const Scenes = {
+  menu:      document.getElementById('menu'),
+  game:      document.getElementById('game-scene'),
+  customize: document.getElementById('customize-scene'),
+};
+function showScene(name) {
+  for (const k in Scenes) Scenes[k].classList.toggle('active', k === name);
 }
 
-function initState() {
-  const board = new Array(64).fill(null);
-  const back = ['r','n','b','q','k','b','n','r'];
-  for (let f = 0; f < 8; f++) {
-    board[sqOf(f, 0)] = { type: back[f], color: 'w' };
-    board[sqOf(f, 1)] = { type: 'p',     color: 'w' };
-    board[sqOf(f, 6)] = { type: 'p',     color: 'b' };
-    board[sqOf(f, 7)] = { type: back[f], color: 'b' };
-  }
-  return {
-    board,
-    side: 'w',
-    castling: { wK: true, wQ: true, bK: true, bQ: true },
-    ep: null,           // square index a pawn could capture into (set for one ply after a 2-square push)
-    halfmove: 0,        // 50-move rule counter
-    fullmove: 1,
-  };
-}
+let activeConfig = Config.loadConfig();
 
-// ===========================================================================
-// CHECK POINT #1 — isAttacked
-// ---------------------------------------------------------------------------
-// Asks: "If `byColor` got to move next, could any of their pieces capture
-// `sq`?"  This is the workhorse primitive. Three callers depend on it:
-//
-//   (a) the self-check filter in legalMoves()    — does my move leave my
-//       own king attacked?
-//   (b) castling generation                      — king can't currently be
-//       in check, and can't pass through an attacked transit square.
-//   (c) gameStatus()                             — is the side-to-move's
-//       king attacked right now? (drives "in check", checkmate, stalemate)
-//
-// Implementation walks *outward* from `sq`: rays for sliders, fixed offsets
-// for knights/king/pawns. First piece hit on each ray decides the answer.
-// ===========================================================================
-function isAttacked(board, sq, byColor) {
-  const f = fileOf(sq), r = rankOf(sq);
+UI.init({
+  board:       document.getElementById('board'),
+  status:      document.getElementById('status'),
+  abilityBar:  document.getElementById('ability-bar'),
+  promo:       document.getElementById('promo'),
+  endOverlay:  document.getElementById('end-overlay'),
+  gameConfig:  activeConfig,
+});
 
-  // Pawn attacks: a `byColor` pawn attacking `sq` would sit one rank
-  // *behind* `sq` from byColor's perspective.
-  const pawnRank = byColor === 'w' ? r - 1 : r + 1;
-  for (const df of [-1, 1]) {
-    if (!inBounds(f + df, pawnRank)) continue;
-    const p = board[sqOf(f + df, pawnRank)];
-    if (p && p.color === byColor && p.type === 'p') return true;
-  }
-
-  // Knights
-  for (const [df, dr] of KNIGHT_OFFSETS) {
-    if (!inBounds(f + df, r + dr)) continue;
-    const p = board[sqOf(f + df, r + dr)];
-    if (p && p.color === byColor && p.type === 'n') return true;
-  }
-
-  // Adjacent king
-  for (const [df, dr] of KING_OFFSETS) {
-    if (!inBounds(f + df, r + dr)) continue;
-    const p = board[sqOf(f + df, r + dr)];
-    if (p && p.color === byColor && p.type === 'k') return true;
-  }
-
-  // Orthogonal rays (rook / queen)
-  for (const [df, dr] of ROOK_DIRS) {
-    let af = f + df, ar = r + dr;
-    while (inBounds(af, ar)) {
-      const p = board[sqOf(af, ar)];
-      if (p) {
-        if (p.color === byColor && (p.type === 'r' || p.type === 'q')) return true;
-        break; // ray blocked
-      }
-      af += df; ar += dr;
+Customize.init({
+  pieceList:  document.getElementById('piece-list'),
+  editorPane: document.getElementById('editor-pane'),
+  onSave: (savedConfig) => {
+    if (savedConfig) {
+      activeConfig = savedConfig;
+      Config.saveConfig(activeConfig);
+      // Re-init UI so any fresh game picks up new defs.
+      UI.init({
+        board:       document.getElementById('board'),
+        status:      document.getElementById('status'),
+        abilityBar:  document.getElementById('ability-bar'),
+        promo:       document.getElementById('promo'),
+        endOverlay:  document.getElementById('end-overlay'),
+        gameConfig:  activeConfig,
+      });
     }
-  }
-  // Diagonal rays (bishop / queen)
-  for (const [df, dr] of BISHOP_DIRS) {
-    let af = f + df, ar = r + dr;
-    while (inBounds(af, ar)) {
-      const p = board[sqOf(af, ar)];
-      if (p) {
-        if (p.color === byColor && (p.type === 'b' || p.type === 'q')) return true;
-        break;
-      }
-      af += df; ar += dr;
-    }
-  }
-  return false;
-}
+    showScene('menu');
+  },
+});
 
-// ===========================================================================
-// pseudoLegalMoves — moves that obey piece-movement rules but ignore
-// whether they leave the mover's own king in check. The self-check rule
-// is enforced one layer up, in legalMoves().
-// ===========================================================================
-function pseudoLegalMoves(state, color) {
-  const moves = [];
-  const { board, ep } = state;
+document.getElementById('btn-play').addEventListener('click', () => {
+  // Fresh game off the active config.
+  UI.init({
+    board:       document.getElementById('board'),
+    status:      document.getElementById('status'),
+    abilityBar:  document.getElementById('ability-bar'),
+    promo:       document.getElementById('promo'),
+    endOverlay:  document.getElementById('end-overlay'),
+    gameConfig:  activeConfig,
+  });
+  showScene('game');
+});
 
-  for (let from = 0; from < 64; from++) {
-    const p = board[from];
-    if (!p || p.color !== color) continue;
-    const f = fileOf(from), r = rankOf(from);
+document.getElementById('btn-customize').addEventListener('click', () => {
+  Customize.show(activeConfig);
+  showScene('customize');
+});
 
-    if (p.type === 'p') {
-      const dir       = color === 'w' ?  1 : -1;
-      const startRank = color === 'w' ?  1 :  6;
-      const promoRank = color === 'w' ?  7 :  0;
+document.getElementById('btn-back-to-menu').addEventListener('click', () => {
+  showScene('menu');
+});
 
-      // Single push
-      if (inBounds(f, r + dir) && !board[sqOf(f, r + dir)]) {
-        const to = sqOf(f, r + dir);
-        if (r + dir === promoRank) {
-          for (const promo of ['q','r','b','n']) moves.push({ from, to, promo });
-        } else {
-          moves.push({ from, to });
-          // Double push: only from start rank, both squares empty
-          if (r === startRank && !board[sqOf(f, r + 2*dir)]) {
-            moves.push({ from, to: sqOf(f, r + 2*dir), double: true });
-          }
-        }
-      }
-      // Diagonal captures + en passant
-      for (const df of [-1, 1]) {
-        if (!inBounds(f + df, r + dir)) continue;
-        const to = sqOf(f + df, r + dir);
-        const tgt = board[to];
-        if (tgt && tgt.color !== color) {
-          if (r + dir === promoRank) {
-            for (const promo of ['q','r','b','n']) moves.push({ from, to, capture: true, promo });
-          } else {
-            moves.push({ from, to, capture: true });
-          }
-        } else if (!tgt && to === ep) {
-          // En passant: legal only on the single ply after the opponent's
-          // 2-square pawn push. State.ep stores the target square.
-          moves.push({ from, to, capture: true, enpassant: true });
-        }
-      }
-    }
-
-    else if (p.type === 'n') {
-      for (const [df, dr] of KNIGHT_OFFSETS) {
-        if (!inBounds(f + df, r + dr)) continue;
-        const to = sqOf(f + df, r + dr);
-        const tgt = board[to];
-        if (!tgt || tgt.color !== color) moves.push({ from, to, capture: !!tgt });
-      }
-    }
-
-    else if (p.type === 'b' || p.type === 'r' || p.type === 'q') {
-      const dirs = p.type === 'b' ? BISHOP_DIRS
-                 : p.type === 'r' ? ROOK_DIRS
-                                  : [...ROOK_DIRS, ...BISHOP_DIRS];
-      for (const [df, dr] of dirs) {
-        let af = f + df, ar = r + dr;
-        while (inBounds(af, ar)) {
-          const to = sqOf(af, ar);
-          const tgt = board[to];
-          if (!tgt) moves.push({ from, to });
-          else { if (tgt.color !== color) moves.push({ from, to, capture: true }); break; }
-          af += df; ar += dr;
-        }
-      }
-    }
-
-    else if (p.type === 'k') {
-      for (const [df, dr] of KING_OFFSETS) {
-        if (!inBounds(f + df, r + dr)) continue;
-        const to = sqOf(f + df, r + dr);
-        const tgt = board[to];
-        if (!tgt || tgt.color !== color) moves.push({ from, to, capture: !!tgt });
-      }
-      addCastlingMoves(state, color, from, moves);
-    }
-  }
-  return moves;
-}
-
-// ---------------------------------------------------------------------------
-// CHECK POINT #2 — Castling has THREE attack checks
-// ---------------------------------------------------------------------------
-//   1. King not currently in check                   (isAttacked on origin)
-//   2. King's transit square not attacked            (isAttacked on transit
-//                                                     with the king *moved*
-//                                                     onto it — see note)
-//   3. King's destination square not attacked        (handled later by the
-//                                                     standard self-check
-//                                                     filter in legalMoves)
-//
-// The transit check needs the king simulated onto the transit square,
-// because the king blocks rays through its origin: e.g. a rook on a1 with
-// the king on e1 doesn't attack f1 *now*, but would the moment the king
-// slides off e1.  Simulating moves the king out of the way of those rays.
-// ---------------------------------------------------------------------------
-function addCastlingMoves(state, color, kingSq, moves) {
-  const { board, castling } = state;
-  const enemy = opposite(color);
-  const homeRank = color === 'w' ? 0 : 7;
-  if (kingSq !== sqOf(4, homeRank)) return;             // king must be on its origin
-  if (isAttacked(board, kingSq, enemy)) return;         // (1) can't castle out of check
-
-  const tryCastle = (side, betweenFiles, transitFile, kingToFile) => {
-    const rights = castling[(color === 'w' ? 'w' : 'b') + side];
-    if (!rights) return;
-    for (const bf of betweenFiles) if (board[sqOf(bf, homeRank)]) return; // squares empty
-
-    // (2) Simulate king on transit square and re-run isAttacked. We have to
-    // modify the board so rays previously blocked by the king at its origin
-    // are now visible.
-    const transit = sqOf(transitFile, homeRank);
-    const tmp = board.slice();
-    tmp[kingSq] = null;
-    tmp[transit] = { type: 'k', color };
-    if (isAttacked(tmp, transit, enemy)) return;
-
-    moves.push({ from: kingSq, to: sqOf(kingToFile, homeRank), castle: side });
-  };
-  tryCastle('K', [5, 6],    5, 6);  // kingside:  f, g empty; transit f; king ends g
-  tryCastle('Q', [1, 2, 3], 3, 2);  // queenside: b, c, d empty; transit d; king ends c
-}
-
-// ===========================================================================
-// applyMove — pure: returns a new state.
-// Updates: piece positions, side-to-move, castling rights, ep target,
-// halfmove clock, fullmove counter. Each derived-state update has a
-// comment because forgetting any one breaks subtle rules.
-// ===========================================================================
-function applyMove(state, m) {
-  const board    = state.board.slice();
-  const castling = { ...state.castling };
-  const piece    = board[m.from];
-  const captured = board[m.to];
-
-  // Move the piece (with promotion if requested)
-  board[m.to]   = m.promo ? { type: m.promo, color: piece.color } : piece;
-  board[m.from] = null;
-
-  // En passant: remove the captured pawn that sits *behind* the destination
-  if (m.enpassant) {
-    const capSq = m.to + (piece.color === 'w' ? -8 : 8);
-    board[capSq] = null;
-  }
-
-  // Castling: also slide the rook to the inside of the king
-  if (m.castle === 'K') {
-    if (piece.color === 'w') { board[5]  = board[7];  board[7]  = null; }
-    else                     { board[61] = board[63]; board[63] = null; }
-  } else if (m.castle === 'Q') {
-    if (piece.color === 'w') { board[3]  = board[0];  board[0]  = null; }
-    else                     { board[59] = board[56]; board[56] = null; }
-  }
-
-  // Castling-rights bookkeeping. Any king move kills both rights for that
-  // color; a rook leaving its home, OR being captured on its home square,
-  // kills the corresponding right.
-  if (piece.type === 'k') {
-    if (piece.color === 'w') { castling.wK = castling.wQ = false; }
-    else                     { castling.bK = castling.bQ = false; }
-  }
-  if (m.from === 0  || m.to === 0)  castling.wQ = false;
-  if (m.from === 7  || m.to === 7)  castling.wK = false;
-  if (m.from === 56 || m.to === 56) castling.bQ = false;
-  if (m.from === 63 || m.to === 63) castling.bK = false;
-
-  // EP target: set ONLY for a 2-square pawn push, otherwise cleared.
-  // (If we forgot to clear, en passant would remain "available" forever.)
-  const ep = m.double ? (m.from + m.to) / 2 : null;
-
-  // Halfmove clock: resets on a pawn move or any capture, else increments.
-  const halfmove = (piece.type === 'p' || captured || m.enpassant) ? 0 : state.halfmove + 1;
-
-  // Fullmove number bumps after Black's move.
-  const fullmove = state.fullmove + (state.side === 'b' ? 1 : 0);
-
-  return { board, side: opposite(state.side), castling, ep, halfmove, fullmove };
-}
-
-// ===========================================================================
-// CHECK POINT #3 — legalMoves: THE self-check filter
-// ---------------------------------------------------------------------------
-// "A move is legal iff, after playing it, your own king is not attacked."
-// This single rule subsumes: pinned pieces can't move off the pin line,
-// you must respond to a check (block, capture the checker, or move the
-// king), and you can never move your king onto an attacked square.
-//
-// Implementation: for each pseudo-legal move, simulate on a clone, look up
-// my king, and ask isAttacked. ~30 candidates per position, so cloning is
-// cheap — only worth optimizing if you build a search engine on top.
-// ===========================================================================
-function legalMoves(state) {
-  const me = state.side;
-  const out = [];
-  for (const m of pseudoLegalMoves(state, me)) {
-    const next = applyMove(state, m);
-    const myKing = findKing(next.board, me);
-    if (!isAttacked(next.board, myKing, opposite(me))) out.push(m);
-  }
-  return out;
-}
-
-// ===========================================================================
-// CHECK POINT #4 — gameStatus: where check / checkmate / stalemate emerge
-// ---------------------------------------------------------------------------
-// Note these are NOT special cases — they're trivial functions of two
-// pieces of data we already computed:
-//
-//   inCheck = isAttacked(myKing, opposite)
-//   noMoves = legalMoves(state).length === 0
-//
-//   checkmate = inCheck && noMoves
-//   stalemate = !inCheck && noMoves
-//   "in check" badge = inCheck && !noMoves
-//
-// Run this once per turn (after applying the previous move), and every UI
-// question — "highlight king red?", "show winner banner?", "block input?"
-// — is just a property of the returned object.
-// ===========================================================================
-function gameStatus(state) {
-  const moves = legalMoves(state);
-  const myKing = findKing(state.board, state.side);
-  const inCheck = isAttacked(state.board, myKing, opposite(state.side));
-  if (moves.length === 0) {
-    return inCheck
-      ? { kind: 'checkmate', winner: opposite(state.side), inCheck, moves }
-      : { kind: 'stalemate', inCheck, moves };
-  }
-  if (state.halfmove >= 100) return { kind: 'draw50', inCheck, moves };
-  return { kind: inCheck ? 'check' : 'normal', inCheck, moves };
-}
-
-// ===========================================================================
-// UI
-// ===========================================================================
-
-let state, selected, legalForSelected, pendingPromo, lastStatus;
-
-const boardEl  = document.getElementById('board');
-const statusEl = document.getElementById('status');
-const promoEl  = document.getElementById('promo');
-
-function reset() {
-  state = initState();
-  selected = null;
-  legalForSelected = [];
-  pendingPromo = null;
-  promoEl.style.display = 'none';
-  promoEl.innerHTML = '';
-  // Compute status once per turn — see CHECK POINT #4.
-  lastStatus = gameStatus(state);
-  render();
-}
-
-function render() {
-  boardEl.innerHTML = '';
-  // Render rank 7 at top so White sits at the bottom.
-  for (let r = 7; r >= 0; r--) {
-    for (let f = 0; f < 8; f++) {
-      const sq = sqOf(f, r);
-      const cell = document.createElement('div');
-      cell.className = 'sq ' + ((f + r) % 2 === 0 ? 'dark' : 'light');
-      const p = state.board[sq];
-      if (p) {
-        cell.textContent = GLYPHS[p.type];
-        cell.classList.add(p.color === 'w' ? 'piece-w' : 'piece-b');
-      }
-      if (selected === sq) cell.classList.add('selected');
-      const m = legalForSelected.find(x => x.to === sq);
-      if (m) cell.classList.add(m.capture ? 'legal-cap' : 'legal-move');
-      // Highlight the king of the side-to-move when in check or mated.
-      if ((lastStatus.kind === 'check' || lastStatus.kind === 'checkmate')
-          && p && p.type === 'k' && p.color === state.side) {
-        cell.classList.add('in-check');
-      }
-      cell.addEventListener('click', () => onClick(sq));
-      boardEl.appendChild(cell);
-    }
-  }
-  const sideName = state.side === 'w' ? 'White' : 'Black';
-  switch (lastStatus.kind) {
-    case 'checkmate': statusEl.textContent = `Checkmate. ${lastStatus.winner === 'w' ? 'White' : 'Black'} wins.`; break;
-    case 'stalemate': statusEl.textContent = 'Stalemate. Draw.'; break;
-    case 'draw50':    statusEl.textContent = '50-move rule. Draw.'; break;
-    case 'check':     statusEl.textContent = `${sideName} to move — in check.`; break;
-    default:          statusEl.textContent = `${sideName} to move.`;
-  }
-}
-
-function onClick(sq) {
-  if (pendingPromo) return;
-  if (lastStatus.kind === 'checkmate' || lastStatus.kind === 'stalemate' || lastStatus.kind === 'draw50') return;
-
-  // ----- CHECK POINT #5 — input validation against the precomputed list ---
-  // No bespoke "is this move legal?" logic here. We just look up whether
-  // the clicked (selected, sq) pair appears in lastStatus.moves. Because
-  // gameStatus already filtered by self-check, we get pin/check rules for
-  // free.
-  // ------------------------------------------------------------------------
-  if (selected !== null) {
-    const matches = lastStatus.moves.filter(m => m.from === selected && m.to === sq);
-    if (matches.length === 1 && !matches[0].promo) {
-      playMove(matches[0]);
-      return;
-    }
-    if (matches.length > 0 && matches[0].promo) {
-      pendingPromo = matches;
-      showPromoPicker(matches);
-      return;
-    }
-  }
-
-  // Otherwise treat the click as selecting one of my own pieces.
-  const p = state.board[sq];
-  if (p && p.color === state.side) {
-    selected = sq;
-    legalForSelected = lastStatus.moves.filter(m => m.from === sq);
-  } else {
-    selected = null;
-    legalForSelected = [];
-  }
-  render();
-}
-
-function playMove(m) {
-  state = applyMove(state, m);
-  selected = null;
-  legalForSelected = [];
-  // Recompute status for the new side-to-move — once per turn, see CP #4.
-  lastStatus = gameStatus(state);
-  render();
-}
-
-function showPromoPicker(matches) {
-  promoEl.innerHTML = '';
-  promoEl.style.display = 'flex';
-  for (const m of matches) {
-    const btn = document.createElement('button');
-    btn.textContent = GLYPHS[m.promo];
-    btn.style.color = state.side === 'w' ? '#fff' : '#111';
-    btn.style.textShadow = state.side === 'w' ? '0 0 1px #000, 0 0 1px #000' : 'none';
-    btn.addEventListener('click', () => {
-      pendingPromo = null;
-      promoEl.style.display = 'none';
-      playMove(m);
-    });
-    promoEl.appendChild(btn);
-  }
-}
-
-document.getElementById('reset').addEventListener('click', reset);
-reset();
+document.getElementById('btn-new-game').addEventListener('click', () => {
+  UI.init({
+    board:       document.getElementById('board'),
+    status:      document.getElementById('status'),
+    abilityBar:  document.getElementById('ability-bar'),
+    promo:       document.getElementById('promo'),
+    endOverlay:  document.getElementById('end-overlay'),
+    gameConfig:  activeConfig,
+  });
+});
 </script>
 </body>
 </html>
