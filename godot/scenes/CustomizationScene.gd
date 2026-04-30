@@ -115,11 +115,10 @@ func _render_editor() -> void:
         var oh := StatusEffectDef.new()
         oh.kind = StatusEffectDef.Kind.NONE
         _def.on_hit = oh
-    if _def.special == null:
-        var sp := SpecialAbilityDef.new()
-        sp.kind = SpecialAbilityDef.Kind.NONE
-        _def.special = sp
     _toggles = _infer_toggles(_def)
+
+    ## --- Player Abilities (global; same UI regardless of selected piece) ---
+    editor_pane.add_child(_build_player_abilities_section())
 
     # --- Identity ---
     var sec := _section("Identity")
@@ -170,29 +169,8 @@ func _render_editor() -> void:
             max(1, _def.on_hit.duration), 1, 10, _on_onhit_duration_changed))
     editor_pane.add_child(onhit)
 
-    # --- Special ability ---
-    var ab := _section("Special ability")
-    ab.add_child(_select_field("Kind", _def.special.kind, [
-        ["None",                  SpecialAbilityDef.Kind.NONE],
-        ["Cannon (delayed AOE)",  SpecialAbilityDef.Kind.CANNON],
-        ["Lightning (instant)",   SpecialAbilityDef.Kind.LIGHTNING],
-    ], _on_special_kind_changed))
-    if _def.special.kind != SpecialAbilityDef.Kind.NONE:
-        ab.add_child(_int_field("Damage",     _def.special.damage,         1, 5,  _on_special_damage_changed))
-        ab.add_child(_int_field("Cooldown",   _def.special.cooldown_turns, 1, 10, _on_special_cooldown_changed))
-        ab.add_child(_int_field("Max charges", _def.special.max_charges,    1, 5,  _on_special_max_changed))
-        ab.add_child(_int_field("Initial charges", _def.special.initial_charges,
-                                0, _def.special.max_charges, _on_special_initial_changed))
-        var summary := Label.new()
-        summary.add_theme_font_size_override("font_size", 11)
-        summary.modulate = Color(1, 1, 1, 0.6)
-        summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-        if _def.special.kind == SpecialAbilityDef.Kind.CANNON:
-            summary.text = "5-square plus AOE, lands one full turn later. Cannot target enemy starting zone."
-        else:
-            summary.text = "Single enemy target, instant. Cannot target the royal piece."
-        ab.add_child(summary)
-    editor_pane.add_child(ab)
+    ## (Special abilities live on GameConfig, not on individual pieces — see
+    ## the "Player Abilities" section at the top of this pane.)
 
     # --- Footer ---
     var footer := HBoxContainer.new()
@@ -235,23 +213,52 @@ func _on_onhit_kind_changed(v: int) -> void:
 func _on_onhit_dpt_changed(v: int) -> void:      _def.on_hit.damage_per_turn = v
 func _on_onhit_duration_changed(v: int) -> void: _def.on_hit.duration = v
 
-func _on_special_kind_changed(v: int) -> void:
-    _def.special.kind = v
-    if v != SpecialAbilityDef.Kind.NONE:
-        if _def.special.damage <= 0:         _def.special.damage = 1
-        if _def.special.cooldown_turns <= 0: _def.special.cooldown_turns = 3
-        if _def.special.max_charges <= 0:    _def.special.max_charges = 1
-        if _def.special.initial_charges < 0: _def.special.initial_charges = 0
-    _render_editor()
+## ===========================================================================
+## Player Abilities section — edits working.cannon and working.lightning.
+## ===========================================================================
 
-func _on_special_damage_changed(v: int) -> void:    _def.special.damage = v
-func _on_special_cooldown_changed(v: int) -> void:  _def.special.cooldown_turns = v
-func _on_special_max_changed(v: int) -> void:
-    _def.special.max_charges = v
-    if _def.special.initial_charges > v:
-        _def.special.initial_charges = v
-    _render_editor()
-func _on_special_initial_changed(v: int) -> void:   _def.special.initial_charges = v
+func _build_player_abilities_section() -> VBoxContainer:
+    var sec := _section("Player Abilities (shared between both players)")
+    if working.cannon == null:
+        working.cannon = Defaults.make_special(SpecialAbilityDef.Kind.CANNON, 2, 4, 1, 0)
+    if working.lightning == null:
+        working.lightning = Defaults.make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
+
+    sec.add_child(_ability_card("◎ Cannon (delayed plus AOE)", working.cannon, true))
+    sec.add_child(_ability_card("⚡ Lightning (instant single-target)", working.lightning, false))
+    return sec
+
+func _ability_card(title: String, spec: SpecialAbilityDef, is_cannon: bool) -> VBoxContainer:
+    var v := VBoxContainer.new()
+    v.add_theme_constant_override("separation", 4)
+    var heading := Label.new()
+    heading.text = title
+    heading.add_theme_font_size_override("font_size", 13)
+    v.add_child(heading)
+
+    if is_cannon:
+        v.add_child(_int_field("Damage",          spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
+        v.add_child(_int_field("Cooldown",        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
+        v.add_child(_int_field("Max charges",     spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
+        v.add_child(_int_field("Initial charges", spec.initial_charges, 0,
+                               max(spec.max_charges, 0),
+                               _ability_setter.bind(spec, "initial_charges")))
+    else:
+        v.add_child(_int_field("Damage",          spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
+        v.add_child(_int_field("Cooldown",        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
+        v.add_child(_int_field("Max charges",     spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
+        v.add_child(_int_field("Initial charges", spec.initial_charges, 0,
+                               max(spec.max_charges, 0),
+                               _ability_setter.bind(spec, "initial_charges")))
+    return v
+
+## Generic int-setter. Bound args (spec, field_name) come AFTER the new value
+## per Callable.bind semantics — Godot 4 appends bound args after call args.
+func _ability_setter(value: int, spec: SpecialAbilityDef, field: String) -> void:
+    spec.set(field, value)
+    if field == "max_charges" and spec.initial_charges > value:
+        spec.initial_charges = value
+        _render_editor()
 
 func _on_reset_this() -> void:
     var fresh := Defaults.make_default_config()
@@ -396,7 +403,6 @@ func _preview_reach(def: PieceDef, from_sq: int, place_enemies: bool) -> Diction
         ## (move_patterns defaults to an empty Array[MovePattern] — no need
         ## to reassign; an untyped `= []` would fail strict-mode type-check.)
         dummy.on_hit = StatusEffectDef.new()
-        dummy.special = SpecialAbilityDef.new()
         cfg.pieces["__dummy"] = dummy
     var board: Array = []; board.resize(64)
     for i in 64: board[i] = null
@@ -500,7 +506,18 @@ func _clone_config(src: GameConfig) -> GameConfig:
         p_dict[id] = _clone_piece_def(src.pieces[id])
     dst.pieces = p_dict
     dst.initial_setup = src.initial_setup.duplicate(true)
+    if src.cannon != null:    dst.cannon    = _clone_special(src.cannon)
+    if src.lightning != null: dst.lightning = _clone_special(src.lightning)
     return dst
+
+func _clone_special(s: SpecialAbilityDef) -> SpecialAbilityDef:
+    var d := SpecialAbilityDef.new()
+    d.kind = s.kind
+    d.damage = s.damage
+    d.cooldown_turns = s.cooldown_turns
+    d.max_charges = s.max_charges
+    d.initial_charges = s.initial_charges
+    return d
 
 func _clone_piece_def(s: PieceDef) -> PieceDef:
     var d := PieceDef.new()
@@ -529,12 +546,4 @@ func _clone_piece_def(s: PieceDef) -> PieceDef:
         ne.damage_per_turn = s.on_hit.damage_per_turn
         ne.duration = s.on_hit.duration
         d.on_hit = ne
-    if s.special != null:
-        var ns := SpecialAbilityDef.new()
-        ns.kind = s.special.kind
-        ns.damage = s.special.damage
-        ns.cooldown_turns = s.special.cooldown_turns
-        ns.max_charges = s.special.max_charges
-        ns.initial_charges = s.special.initial_charges
-        d.special = ns
     return d

@@ -26,7 +26,7 @@ var last_status: Dictionary = {}
 var mode := "select_piece"
 var selected := -1
 var legal_for_selected: Array = []
-var ability_ctx: Dictionary = {}     ## { source_sq, kind, targets }
+var ability_ctx: Dictionary = {}     ## { kind, targets } — set when ability armed
 var pending_promo: Array = []
 var hover_target_sq := -1
 
@@ -267,8 +267,7 @@ func _render() -> void:
             bg.color = CHECK_TINT
         if selected == sq and mode == "select_move":
             hl.color = SELECTED_TINT
-        if mode == "select_ability" and int(ability_ctx.get("source_sq", -1)) == sq:
-            hl.color = ABILITY_SRC_TINT
+        ## (No "ability source" highlight: abilities are global, not piece-bound.)
         if mode == "select_move":
             for m in legal_for_selected:
                 if int(m["to"]) == sq:
@@ -308,15 +307,8 @@ func _render() -> void:
                 elif e.kind == StatusEffectDef.Kind.FREEZE:
                     fx_parts.append("❄%d" % e.turns_remaining)
             fx_lbl.text = " ".join(fx_parts)
-
-            if def.special != null and def.special.kind != SpecialAbilityDef.Kind.NONE:
-                var icon := "◎" if def.special.kind == SpecialAbilityDef.Kind.CANNON else "⚡"
-                if p.special_charges > 0:
-                    ch_lbl.text = "%s×%d" % [icon, p.special_charges]
-                    ch_lbl.add_theme_color_override("font_color", Color(0.6, 1, 0.6))
-                else:
-                    ch_lbl.text = "%s·%d" % [icon, p.special_recharge]
-                    ch_lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+            ## (No per-piece charge badge: abilities are global resources
+            ## owned by the player, surfaced in the ability bar instead.)
 
     # --- Status text ---
     var side_name := "White" if state.side == Rules.WHITE else "Black"
@@ -354,30 +346,40 @@ func _render_ability_bar() -> void:
         ability_bar.add_child(note)
         return
 
+    var color := state.side
     var found := 0
-    for sq in 64:
-        var p = state.board[sq]
-        if p == null or p.color != state.side: continue
-        var def: PieceDef = state.config.pieces[p.def_id]
-        if def.special == null or def.special.kind == SpecialAbilityDef.Kind.NONE: continue
-        if p.special_charges <= 0: continue
-        if Rules.is_frozen(p): continue
-        found += 1
-
-        var btn := Button.new()
-        var kind_name := "Cannon" if def.special.kind == SpecialAbilityDef.Kind.CANNON else "Lightning"
-        btn.text = "%s %s (%d)" % [def.glyph, kind_name, p.special_charges]
-        btn.tooltip_text = _describe_ability(def.special)
-        if mode == "select_ability" and int(ability_ctx.get("source_sq", -1)) == sq:
-            btn.modulate = Color(0.7, 0.9, 1.2)
-        btn.pressed.connect(_on_ability_button_clicked.bind(sq))
-        ability_bar.add_child(btn)
+    found += _add_ability_button(SpecialAbilityDef.Kind.CANNON,
+                                 "Cannon", "◎",
+                                 state.config.cannon,
+                                 state.cannon_state[color] if color < state.cannon_state.size() else null)
+    found += _add_ability_button(SpecialAbilityDef.Kind.LIGHTNING,
+                                 "Lightning", "⚡",
+                                 state.config.lightning,
+                                 state.lightning_state[color] if color < state.lightning_state.size() else null)
 
     if found == 0:
         var note := Label.new()
         note.text = "No abilities ready"
         note.modulate = Color(1, 1, 1, 0.45)
         ability_bar.add_child(note)
+
+func _add_ability_button(kind: int, label: String, icon: String,
+                         spec: SpecialAbilityDef, rt: AbilityRuntime) -> int:
+    if spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return 0
+    if rt == null: return 0
+    var btn := Button.new()
+    var has_charges := rt.charges > 0
+    if has_charges:
+        btn.text = "%s %s (%d)" % [icon, label, rt.charges]
+    else:
+        btn.text = "%s %s · in %d" % [icon, label, rt.recharge]
+        btn.disabled = true
+    btn.tooltip_text = _describe_ability(spec)
+    if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
+        btn.modulate = Color(0.7, 0.9, 1.2)
+    btn.pressed.connect(_on_ability_button_clicked.bind(kind))
+    ability_bar.add_child(btn)
+    return 1 if has_charges else 0
 
 func _describe_ability(spec: SpecialAbilityDef) -> String:
     if spec.kind == SpecialAbilityDef.Kind.CANNON:
@@ -426,16 +428,13 @@ func _on_square_clicked(sq: int) -> void:
         mode = "select_piece"
     _render()
 
-func _on_ability_button_clicked(source_sq: int) -> void:
-    if mode == "select_ability" and int(ability_ctx.get("source_sq", -1)) == source_sq:
+func _on_ability_button_clicked(kind: int) -> void:
+    if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
         _cancel_ability()
         return
-    var p: Piece = state.board[source_sq]
-    var def: PieceDef = state.config.pieces[p.def_id]
     ability_ctx = {
-        "source_sq": source_sq,
-        "kind": def.special.kind,
-        "targets": Rules.list_ability_targets(state, source_sq),
+        "kind": kind,
+        "targets": Rules.list_ability_targets(state, kind),
     }
     mode = "select_ability"
     selected = -1
@@ -452,7 +451,6 @@ func _handle_ability_click(sq: int) -> void:
         return
     var r := Rules.apply_ability(state, {
         "kind": int(ability_ctx["kind"]),
-        "source_sq": int(ability_ctx["source_sq"]),
         "target_sq": sq,
     })
     state = r["state"]

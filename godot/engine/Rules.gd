@@ -61,9 +61,6 @@ static func make_piece(def_id: String, color: int, def: PieceDef) -> Piece:
 	p.def_id = def_id
 	p.color = color
 	p.hp = def.hp
-	if def.special != null and def.special.kind != SpecialAbilityDef.Kind.NONE:
-		p.special_charges = def.special.initial_charges
-		p.special_recharge = def.special.cooldown_turns
 	return p
 
 static func find_royal(state: GameState, color: int) -> int:
@@ -109,7 +106,21 @@ static func new_game(config: GameConfig) -> GameState:
 		if p != null:
 			s.initial_squares_by_color[p.color][i] = true
 
+	## Per-color ability runtimes — populate from the global ability specs
+	## on the config. Each color gets its own charges/cooldown counter so
+	## the two players' abilities don't share state.
+	for color in 2:
+		s.cannon_state.append(_make_runtime(config.cannon))
+		s.lightning_state.append(_make_runtime(config.lightning))
+
 	return s
+
+static func _make_runtime(spec: SpecialAbilityDef) -> AbilityRuntime:
+	var rt := AbilityRuntime.new()
+	if spec != null and spec.kind != SpecialAbilityDef.Kind.NONE:
+		rt.charges  = spec.initial_charges
+		rt.recharge = spec.cooldown_turns
+	return rt
 
 # =============================================================================
 # PRIMITIVE — is_attacked / max_incoming_damage
@@ -373,15 +384,16 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 	var piece: Piece = next.board[from_sq]
 	if piece == null:
 		push_error("apply_move: empty square at from=%d" % from_sq)
-		return { "state": next, "events": events, "mute": true }
+		return { "state": next, "events": events }
 	var def: PieceDef = state.config.pieces[piece.def_id]
 
 	var captured = next.board[to_sq]
 	var damage_dealt := false
-	var attacker_moves := true   ## if target survives, attacker stays put
 
 	if m.get("enpassant", false):
-		## En passant: captured pawn sits BEHIND destination.
+		## En passant: captured pawn sits BEHIND destination. Damage path runs
+		## through the same survive/kill branch as a regular attack so high-HP
+		## EP-captured pawns work in custom configs.
 		var cap_sq := to_sq + (-8 if piece.color == WHITE else 8)
 		captured = next.board[cap_sq]
 		if captured != null:
@@ -391,31 +403,34 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 				events.append({ "kind": "kill", "sq": cap_sq })
 			else:
 				captured.hp -= dmg
+				events.append({ "kind": "damage", "sq": cap_sq, "hp": captured.hp })
+				_maybe_apply_on_hit_effect(next, cap_sq, captured, def)
 				_apply_push_chain(next, cap_sq,
 								  -8 if captured.color == WHITE else 8, events)
 			damage_dealt = true
-			_maybe_apply_on_hit_effect(next, to_sq, captured, def)
 		next.board[to_sq] = piece
 		next.board[from_sq] = null
 		events.append({ "kind": "move", "from": from_sq, "to": to_sq })
 
 	elif captured != null:
+		## Attack: attacker ALWAYS takes the target's square afterwards.
+		##   - Target HP <= attacker.damage → target removed (normal capture).
+		##   - Target HP  > attacker.damage → target damaged + pushed toward
+		##     its own home rank (chain victims relocate without damage; off-
+		##     board = killed). Either way, target's old square is empty by
+		##     the time the attacker walks in.
 		var dmg := def.damage
 		if captured.hp <= dmg:
-			## Target dies → attacker takes the square.
 			events.append({ "kind": "kill", "sq": to_sq })
-			next.board[to_sq] = piece
-			next.board[from_sq] = null
-			events.append({ "kind": "move", "from": from_sq, "to": to_sq })
 		else:
-			## Target survives → damage + push toward target's home rank.
-			## Chain victims take NO damage (§10.4) — they only relocate.
 			captured.hp -= dmg
 			events.append({ "kind": "damage", "sq": to_sq, "hp": captured.hp })
 			_maybe_apply_on_hit_effect(next, to_sq, captured, def)
 			var push_dir := -8 if captured.color == WHITE else 8
 			_apply_push_chain(next, to_sq, push_dir, events)
-			attacker_moves = false
+		next.board[to_sq] = piece
+		next.board[from_sq] = null
+		events.append({ "kind": "move", "from": from_sq, "to": to_sq })
 		damage_dealt = true
 
 	else:
@@ -431,12 +446,6 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 		var promo_def: PieceDef = state.config.pieces[promo_id]
 		promo_piece.def_id = promo_id
 		promo_piece.hp = promo_def.hp
-		if promo_def.special != null and promo_def.special.kind != SpecialAbilityDef.Kind.NONE:
-			promo_piece.special_charges = promo_def.special.initial_charges
-			promo_piece.special_recharge = promo_def.special.cooldown_turns
-		else:
-			promo_piece.special_charges = 0
-			promo_piece.special_recharge = 0
 		events.append({ "kind": "promote", "sq": to_sq, "id": promo_id })
 
 	piece.has_moved = true
@@ -488,7 +497,7 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 
 	next.special_used_this_turn = false
 
-	return { "state": next, "events": events, "mute": not attacker_moves }
+	return { "state": next, "events": events }
 
 # ---------------------------------------------------------------------------
 # Push-chain (§10.4). Piece at start_sq shifts by `dir` (square-index delta:
@@ -623,17 +632,21 @@ static func _tick_status_effects(state: GameState, events: Array) -> void:
 				keep.append(e)
 		p.active_effects = keep
 
+## Tick the side-to-move's ability recharges. Per-color, NOT per-piece —
+## abilities are global resources owned by the player.
 static func _tick_ability_recharge(state: GameState) -> void:
-	for i in 64:
-		var p = state.board[i]
-		if p == null or p.color != state.side: continue
-		var def: PieceDef = state.config.pieces[p.def_id]
-		if def.special == null or def.special.kind == SpecialAbilityDef.Kind.NONE:
-			continue
-		if p.special_recharge > 0: p.special_recharge -= 1
-		if p.special_recharge == 0 and p.special_charges < def.special.max_charges:
-			p.special_charges += 1
-			p.special_recharge = def.special.cooldown_turns
+	var color := state.side
+	if color < state.cannon_state.size():
+		_tick_one_runtime(state.cannon_state[color], state.config.cannon)
+	if color < state.lightning_state.size():
+		_tick_one_runtime(state.lightning_state[color], state.config.lightning)
+
+static func _tick_one_runtime(rt: AbilityRuntime, spec: SpecialAbilityDef) -> void:
+	if rt == null or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return
+	if rt.recharge > 0: rt.recharge -= 1
+	if rt.recharge == 0 and rt.charges < spec.max_charges:
+		rt.charges += 1
+		rt.recharge = spec.cooldown_turns
 
 # =============================================================================
 # legal_moves — HP-aware self-check filter.
@@ -735,28 +748,31 @@ static func game_status(state: GameState) -> Dictionary:
 # =============================================================================
 # ABILITIES — Cannon (queued AOE) and Lightning (instant single-target).
 # -----------------------------------------------------------------------------
-# Abilities are fired SEPARATELY from the regular move (UI orchestrates both
-# within a single turn). Each ability use:
-#   - source must belong to side-to-move and not be frozen.
-#   - special_used_this_turn must be false.
-#   - source.special_charges > 0.
-#   - target must be valid for the ability kind.
+# Abilities are GLOBAL to each player — not tied to specific pieces. They live
+# on GameConfig (.cannon, .lightning) and have per-color runtime charges on
+# GameState (.cannon_state, .lightning_state). Each ability use:
+#   - special_used_this_turn must be false (one ability per turn cap).
+#   - the player's runtime charges for that ability must be > 0.
+#   - the chosen target must be valid for the ability kind.
 # Ability use does NOT flip side or tick. It mutates and sets
-# special_used_this_turn = true.
+# special_used_this_turn = true; the next regular move flips side and ticks.
 # =============================================================================
 
-static func list_ability_targets(state: GameState, source_sq: int) -> Array:
-	var p = state.board[source_sq]
-	if p == null or p.color != state.side: return []
-	var def: PieceDef = state.config.pieces[p.def_id]
-	if def.special == null or def.special.kind == SpecialAbilityDef.Kind.NONE: return []
+## List valid targets for the given ability kind. ability_kind is
+## SpecialAbilityDef.Kind.CANNON or .LIGHTNING. Returns:
+##   Cannon   → [{ sq: int, plus: Array[int] }, ...]   center squares
+##   Lightning → [{ sq: int }, ...]                    enemy non-royal squares
+static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 	if state.special_used_this_turn: return []
-	if p.special_charges <= 0: return []
-	if is_frozen(p): return []
+	var color := state.side
+	var rt := _runtime_for(state, color, ability_kind)
+	var spec := _spec_for(state, ability_kind)
+	if rt == null or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return []
+	if rt.charges <= 0: return []
 
 	var out: Array = []
-	if def.special.kind == SpecialAbilityDef.Kind.CANNON:
-		var enemy := opposite(p.color)
+	if ability_kind == SpecialAbilityDef.Kind.CANNON:
+		var enemy := opposite(color)
 		var forbidden: Dictionary = state.initial_squares_by_color[enemy]
 		for target in 64:
 			var plus := cannon_plus_squares(target)
@@ -768,14 +784,30 @@ static func list_ability_targets(state: GameState, source_sq: int) -> Array:
 					break
 			if ok:
 				out.append({ "sq": target, "plus": plus })
-	elif def.special.kind == SpecialAbilityDef.Kind.LIGHTNING:
+	elif ability_kind == SpecialAbilityDef.Kind.LIGHTNING:
 		for target in 64:
 			var t = state.board[target]
-			if t == null or t.color == p.color: continue
+			if t == null or t.color == color: continue
 			var tdef: PieceDef = state.config.pieces[t.def_id]
 			if tdef.royal: continue
 			out.append({ "sq": target })
 	return out
+
+## Look up the AbilityRuntime for (color, kind). Returns null if kind isn't
+## one of the known ability kinds.
+static func _runtime_for(state: GameState, color: int, kind: int) -> AbilityRuntime:
+	if kind == SpecialAbilityDef.Kind.CANNON \
+			and color < state.cannon_state.size():
+		return state.cannon_state[color]
+	if kind == SpecialAbilityDef.Kind.LIGHTNING \
+			and color < state.lightning_state.size():
+		return state.lightning_state[color]
+	return null
+
+static func _spec_for(state: GameState, kind: int) -> SpecialAbilityDef:
+	if kind == SpecialAbilityDef.Kind.CANNON:    return state.config.cannon
+	if kind == SpecialAbilityDef.Kind.LIGHTNING: return state.config.lightning
+	return null
 
 static func cannon_plus_squares(center_sq: int) -> Array[int]:
 	var out: Array[int] = []
@@ -791,36 +823,35 @@ static func cannon_plus_squares(center_sq: int) -> Array[int]:
 		out.append(sq_of(nf, nr))
 	return out
 
+## Action dict shape (no source piece anymore):
+##   { "kind": int (CANNON|LIGHTNING), "target_sq": int }
+## Returns "" on success, an error string on rejection.
 static func validate_ability(state: GameState, action: Dictionary) -> String:
 	if state.special_used_this_turn: return "already used ability this turn"
-	var src_sq: int = int(action["source_sq"])
-	var src = state.board[src_sq]
-	if src == null or src.color != state.side: return "source not your piece"
-	if is_frozen(src):                        return "source is frozen"
-	var def: PieceDef = state.config.pieces[src.def_id]
-	if def.special == null:                   return "no ability"
 	var kind: int = int(action["kind"])
-	if def.special.kind != kind:              return "wrong ability"
-	if src.special_charges <= 0:              return "no charges"
+	var color := state.side
+	var rt := _runtime_for(state, color, kind)
+	var spec := _spec_for(state, kind)
+	if rt == null or spec == null: return "unknown ability"
+	if spec.kind == SpecialAbilityDef.Kind.NONE: return "ability not configured"
+	if rt.charges <= 0:                          return "no charges"
 
 	var target_sq: int = int(action["target_sq"])
 	if kind == SpecialAbilityDef.Kind.CANNON:
 		var plus := cannon_plus_squares(target_sq)
-		if plus.is_empty():                   return "plus area off-board"
-		var enemy := opposite(src.color)
+		if plus.is_empty():                      return "plus area off-board"
+		var enemy := opposite(color)
 		var forbidden: Dictionary = state.initial_squares_by_color[enemy]
 		for s in plus:
 			if forbidden.has(s):
 				return "plus area overlaps enemy starting zone"
 	elif kind == SpecialAbilityDef.Kind.LIGHTNING:
 		var t = state.board[target_sq]
-		if t == null:                         return "target empty"
-		if t.color == src.color:              return "cannot target friendly"
+		if t == null:                            return "target empty"
+		if t.color == color:                     return "cannot target friendly"
 		var tdef: PieceDef = state.config.pieces[t.def_id]
-		if tdef.royal:                        return "cannot target royal piece"
-	else:
-		return "unknown ability"
-	return ""   ## valid
+		if tdef.royal:                           return "cannot target royal piece"
+	return ""
 
 static func apply_ability(state: GameState, action: Dictionary) -> Dictionary:
 	var err := validate_ability(state, action)
@@ -830,37 +861,35 @@ static func apply_ability(state: GameState, action: Dictionary) -> Dictionary:
 
 	var next := state.clone_state()
 	var events: Array = []
-	var src_sq: int = int(action["source_sq"])
-	var target_sq: int = int(action["target_sq"])
-	var src: Piece = next.board[src_sq]
-	var def: PieceDef = state.config.pieces[src.def_id]
-	src.special_charges -= 1
-	src.special_recharge = def.special.cooldown_turns
-
 	var kind: int = int(action["kind"])
+	var target_sq: int = int(action["target_sq"])
+	var color := next.side
+	var rt := _runtime_for(next, color, kind)
+	var spec := _spec_for(next, kind)
+	rt.charges -= 1
+	rt.recharge = spec.cooldown_turns
+
 	if kind == SpecialAbilityDef.Kind.CANNON:
 		## Queue the attack — does not damage anything immediately.
 		var pa := PendingAttack.new()
 		pa.kind = SpecialAbilityDef.Kind.CANNON
-		pa.owner_color = src.color
-		pa.damage = def.special.damage
+		pa.owner_color = color
+		pa.damage = spec.damage
 		pa.target_squares = cannon_plus_squares(target_sq)
 		pa.triggers_on_fullmove = cannon_trigger_fullmove(state)
 		next.pending_attacks.append(pa)
-		events.append({ "kind": "cannonQueued",
-						"source": src_sq, "target": target_sq })
+		events.append({ "kind": "cannonQueued", "target": target_sq })
 	elif kind == SpecialAbilityDef.Kind.LIGHTNING:
 		## Instant. No push-back, no on-hit effect (§7.2).
 		var v: Piece = next.board[target_sq]
-		if v.hp <= def.special.damage:
+		if v.hp <= spec.damage:
 			events.append({ "kind": "kill", "sq": target_sq, "by": "lightning" })
 			next.board[target_sq] = null
 		else:
-			v.hp -= def.special.damage
+			v.hp -= spec.damage
 			events.append({ "kind": "damage", "sq": target_sq, "hp": v.hp,
 							"by": "lightning" })
-		events.append({ "kind": "lightning",
-						"source": src_sq, "target": target_sq })
+		events.append({ "kind": "lightning", "target": target_sq })
 
 	next.special_used_this_turn = true
 	return { "state": next, "events": events }
