@@ -569,7 +569,7 @@ static func _maybe_apply_on_hit_effect(state: GameState, victim_sq: int,
 # =============================================================================
 
 static func _resolve_pending_cannons(state: GameState, events: Array) -> void:
-	var still_pending: Array = []
+	var still_pending: Array[PendingAttack] = []
 	for pa: PendingAttack in state.pending_attacks:
 		var triggers_now: bool = \
 			pa.kind == SpecialAbilityDef.Kind.CANNON \
@@ -617,7 +617,7 @@ static func _tick_status_effects(state: GameState, events: Array) -> void:
 		for e in p.active_effects:
 			if e.turns_remaining > 0:
 				e.turns_remaining -= 1
-		var keep: Array = []
+		var keep: Array[ActiveEffect] = []
 		for e in p.active_effects:
 			if e.turns_remaining > 0:
 				keep.append(e)

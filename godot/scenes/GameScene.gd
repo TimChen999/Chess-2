@@ -272,10 +272,12 @@ func _render() -> void:
         if mode == "select_move":
             for m in legal_for_selected:
                 if int(m["to"]) == sq:
+                    ## Distinct hues — green = empty-square move, red = capture.
+                    ## Same scheme as the customization reachability preview.
                     if m.get("capture", false):
-                        hl.color = Color(0.85, 0.25, 0.25, 0.55)
+                        hl.color = Color(0.86, 0.42, 0.42, 0.62)  ## red
                     else:
-                        dot_lbl.text = "•"
+                        hl.color = Color(0.42, 0.78, 0.5, 0.55)   ## green
                     break
         if mode == "select_ability":
             for t in ability_ctx.get("targets", []):

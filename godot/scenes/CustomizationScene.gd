@@ -363,6 +363,10 @@ func _build_reach_grid(def: PieceDef) -> GridContainer:
     var reach_a := _preview_reach(def, center, false)
     var reach_b := _preview_reach(def, center, true)
 
+    ## Distinct colors — green for "this piece can MOVE here" (empty target),
+    ## red for "this piece can CAPTURE here" (an enemy is hypothetically
+    ## standing on it), yellow for the piece itself. Doesn't reuse the
+    ## dark/light tile color so the highlight reads at a glance.
     for r in range(7, -1, -1):
         for f in 8:
             var sq := r * 8 + f
@@ -373,9 +377,9 @@ func _build_reach_grid(def: PieceDef) -> GridContainer:
             if sq == center:
                 cell.color = Color(0.96, 0.83, 0.4)
             elif reach_a.has(sq):
-                cell.color = cell.color.lerp(Color(0, 0, 0), 0.3)
+                cell.color = Color(0.42, 0.78, 0.5)   ## green — movable empty
             elif reach_b.has(sq):
-                cell.color = cell.color.lerp(Color(0.85, 0.2, 0.2), 0.45)
+                cell.color = Color(0.86, 0.42, 0.42) ## red   — capturable
             grid.add_child(cell)
     return grid
 
@@ -389,7 +393,8 @@ func _preview_reach(def: PieceDef, from_sq: int, place_enemies: bool) -> Diction
         dummy.glyph = "?"
         dummy.hp = 99
         dummy.damage = 1
-        dummy.move_patterns = []
+        ## (move_patterns defaults to an empty Array[MovePattern] — no need
+        ## to reassign; an untyped `= []` would fail strict-mode type-check.)
         dummy.on_hit = StatusEffectDef.new()
         dummy.special = SpecialAbilityDef.new()
         cfg.pieces["__dummy"] = dummy
