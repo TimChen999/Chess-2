@@ -653,7 +653,75 @@ current king HP. No multi-turn forecasting. Death sometimes happens
 and that's fine — the engine doesn't predict, it just enforces
 survivability rules turn by turn.
 
-### 11.8 Summary
+### 11.8 One-turn coupling vs multi-turn search — when knockback on abilities forces extra enumeration
+
+A subtle question about the per-turn damage budget: if an instant
+ability has knockback that can move the king, does the engine have to
+enumerate "ways opponent could knock pieces around to set up a kill"
+during legal-move filtering and mate detection?
+
+**Yes — but only within one opponent turn**, and that distinction is
+the line between bounded and exponential.
+
+#### What the engine checks vs doesn't check
+
+When evaluating my king's safety, the engine considers opponent's
+coupled (ability, move) pairs on their *single next turn*. That
+includes scenarios like: "opp uses lightning to knock my defender out
+of the way, then their queen attacks my king through the now-open
+line." The engine enumerates the ~300×300 pairs and asks whether any
+combination kills my king.
+
+What the engine **does not** check: multi-turn knockback plans like
+"opp knocks defender on turn 1, repositions on turn 2, attacks on turn
+3." Those require tree search — explicitly out of scope. The player
+sees those threats themselves the way humans do in classical chess.
+
+#### Cost breakdown
+
+| Scenario                                                  | Per-evaluation work                     | Mate detection             |
+| --------------------------------------------------------- | --------------------------------------- | -------------------------- |
+| Without ability knockback affecting king                  | sum of independent maxes — O(branching) | O(branching²) ≈ 90k ops    |
+| With ability knockback affecting king (one-turn coupling) | max over coupled pairs — O(branching²)  | O(branching³) ≈ 27M ops    |
+| Multi-turn knockback planning                             | tree search — O(branching^N)            | **exponential — excluded** |
+
+The jump from row 1 to row 2 is a constant-factor polynomial increase:
+still bounded, but mate detection in interpreted languages goes from
+milliseconds to ~1 second.
+
+#### The fix: king push-immunity
+
+If kings cannot be relocated by ability knockback (rule recommended in
+§10.4 / IMPLEMENTATION-GODOT §7), the ability and move on opponent's
+turn don't couple through king position. They become independent
+contributors to the damage budget, and the §11.7 closed-form
+sum-of-maxes is preserved. Without that rule, the engine still works
+and stays polynomial — just at the higher constant factor.
+
+#### Same family, different magnitude
+
+Both this and multi-move turns are **coupling problems** — actions on a
+single turn that can no longer be treated as independent contributors.
+The engine has to enumerate combinations either way. The difference is
+what gets multiplied.
+
+Multi-move turns (§12) couple two *independent decisions* per ply,
+giving polynomial-going-on-exponential branching as N grows. Knockback
+on a single ability widens *one* enumeration — a constant-factor jump
+in degree, not in depth. It's a one-time tax, not a growth function.
+
+| Variant                            | Coupling                              | Complexity                       |
+| ---------------------------------- | ------------------------------------- | -------------------------------- |
+| Multi-move turns                   | (m₁, m₂) × (m₁', m₂') — 4-way         | Polynomial → exponential in N    |
+| Ability knockback, king-immune     | None                                  | O(branching) per eval (current)  |
+| Ability knockback, king-pushable   | (ability, move) coupled via king pos  | O(branching²) per eval, bounded  |
+
+**Asymmetry:** multi-move duplicates a *ply* (search depth grows);
+knockback widens *one ply's* enumeration (branching widens once). The
+engine has more to check either way — but only one of those scales out
+of control.
+
+### 11.9 Summary
 
 | Feature                              | Code add | Runtime impact                              | Check rule                                     |
 | ------------------------------------ | -------- | ------------------------------------------- | ---------------------------------------------- |
