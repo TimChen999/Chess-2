@@ -364,15 +364,17 @@ func _render_ability_bar() -> void:
         ability_bar.add_child(note)
 
 func _add_ability_button(kind: int, label: String, icon: String,
-                         spec: SpecialAbilityDef, rt: AbilityRuntime) -> int:
+                         spec: SpecialAbilityDef, rt) -> int:
     if spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return 0
-    if rt == null: return 0
+    if rt == null or not (rt is Dictionary): return 0
     var btn := Button.new()
-    var has_charges := rt.charges > 0
+    var charges: int  = int(rt["charges"])
+    var recharge: int = int(rt["recharge"])
+    var has_charges := charges > 0
     if has_charges:
-        btn.text = "%s %s (%d)" % [icon, label, rt.charges]
+        btn.text = "%s %s (%d)" % [icon, label, charges]
     else:
-        btn.text = "%s %s · in %d" % [icon, label, rt.recharge]
+        btn.text = "%s %s · in %d" % [icon, label, recharge]
         btn.disabled = true
     btn.tooltip_text = _describe_ability(spec)
     if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:

@@ -109,17 +109,18 @@ static func new_game(config: GameConfig) -> GameState:
 	## Per-color ability runtimes — populate from the global ability specs
 	## on the config. Each color gets its own charges/cooldown counter so
 	## the two players' abilities don't share state.
+	## Each runtime is a plain Dictionary { "charges": int, "recharge": int }.
 	for color in 2:
 		s.cannon_state.append(_make_runtime(config.cannon))
 		s.lightning_state.append(_make_runtime(config.lightning))
 
 	return s
 
-static func _make_runtime(spec: SpecialAbilityDef) -> AbilityRuntime:
-	var rt := AbilityRuntime.new()
+static func _make_runtime(spec: SpecialAbilityDef) -> Dictionary:
+	var rt := { "charges": 0, "recharge": 0 }
 	if spec != null and spec.kind != SpecialAbilityDef.Kind.NONE:
-		rt.charges  = spec.initial_charges
-		rt.recharge = spec.cooldown_turns
+		rt["charges"]  = spec.initial_charges
+		rt["recharge"] = spec.cooldown_turns
 	return rt
 
 # =============================================================================
@@ -641,12 +642,12 @@ static func _tick_ability_recharge(state: GameState) -> void:
 	if color < state.lightning_state.size():
 		_tick_one_runtime(state.lightning_state[color], state.config.lightning)
 
-static func _tick_one_runtime(rt: AbilityRuntime, spec: SpecialAbilityDef) -> void:
+static func _tick_one_runtime(rt: Dictionary, spec: SpecialAbilityDef) -> void:
 	if rt == null or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return
-	if rt.recharge > 0: rt.recharge -= 1
-	if rt.recharge == 0 and rt.charges < spec.max_charges:
-		rt.charges += 1
-		rt.recharge = spec.cooldown_turns
+	if rt["recharge"] > 0: rt["recharge"] -= 1
+	if rt["recharge"] == 0 and rt["charges"] < spec.max_charges:
+		rt["charges"] += 1
+		rt["recharge"] = spec.cooldown_turns
 
 # =============================================================================
 # legal_moves — HP-aware self-check filter.
@@ -765,10 +766,10 @@ static func game_status(state: GameState) -> Dictionary:
 static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 	if state.special_used_this_turn: return []
 	var color := state.side
-	var rt := _runtime_for(state, color, ability_kind)
+	var rt: Dictionary = _runtime_for(state, color, ability_kind)
 	var spec := _spec_for(state, ability_kind)
-	if rt == null or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return []
-	if rt.charges <= 0: return []
+	if rt.is_empty() or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return []
+	if int(rt["charges"]) <= 0: return []
 
 	var out: Array = []
 	if ability_kind == SpecialAbilityDef.Kind.CANNON:
@@ -793,16 +794,16 @@ static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 			out.append({ "sq": target })
 	return out
 
-## Look up the AbilityRuntime for (color, kind). Returns null if kind isn't
-## one of the known ability kinds.
-static func _runtime_for(state: GameState, color: int, kind: int) -> AbilityRuntime:
+## Look up the runtime Dictionary for (color, kind). Returns an empty
+## Dictionary if kind isn't one of the known ability kinds.
+static func _runtime_for(state: GameState, color: int, kind: int) -> Dictionary:
 	if kind == SpecialAbilityDef.Kind.CANNON \
 			and color < state.cannon_state.size():
 		return state.cannon_state[color]
 	if kind == SpecialAbilityDef.Kind.LIGHTNING \
 			and color < state.lightning_state.size():
 		return state.lightning_state[color]
-	return null
+	return {}
 
 static func _spec_for(state: GameState, kind: int) -> SpecialAbilityDef:
 	if kind == SpecialAbilityDef.Kind.CANNON:    return state.config.cannon
@@ -830,11 +831,11 @@ static func validate_ability(state: GameState, action: Dictionary) -> String:
 	if state.special_used_this_turn: return "already used ability this turn"
 	var kind: int = int(action["kind"])
 	var color := state.side
-	var rt := _runtime_for(state, color, kind)
+	var rt: Dictionary = _runtime_for(state, color, kind)
 	var spec := _spec_for(state, kind)
-	if rt == null or spec == null: return "unknown ability"
+	if rt.is_empty() or spec == null: return "unknown ability"
 	if spec.kind == SpecialAbilityDef.Kind.NONE: return "ability not configured"
-	if rt.charges <= 0:                          return "no charges"
+	if int(rt["charges"]) <= 0:                  return "no charges"
 
 	var target_sq: int = int(action["target_sq"])
 	if kind == SpecialAbilityDef.Kind.CANNON:
@@ -864,10 +865,10 @@ static func apply_ability(state: GameState, action: Dictionary) -> Dictionary:
 	var kind: int = int(action["kind"])
 	var target_sq: int = int(action["target_sq"])
 	var color := next.side
-	var rt := _runtime_for(next, color, kind)
+	var rt: Dictionary = _runtime_for(next, color, kind)
 	var spec := _spec_for(next, kind)
-	rt.charges -= 1
-	rt.recharge = spec.cooldown_turns
+	rt["charges"] -= 1
+	rt["recharge"] = spec.cooldown_turns
 
 	if kind == SpecialAbilityDef.Kind.CANNON:
 		## Queue the attack — does not damage anything immediately.

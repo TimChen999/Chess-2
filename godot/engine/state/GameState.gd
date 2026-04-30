@@ -15,10 +15,12 @@ var special_used_this_turn: bool = false
 ## Snapshot of starting positions per color, used by Cannon's enemy-zone
 ## guard. [white_dict, black_dict], each dict: int square -> bool.
 var initial_squares_by_color: Array = [{}, {}]
-## Per-color ability state. Each is length-2: [white_runtime, black_runtime].
-## Either entry may stay at zero charges if config.cannon / .lightning is null.
-var cannon_state: Array[AbilityRuntime] = []
-var lightning_state: Array[AbilityRuntime] = []
+## Per-color ability state. Length 2 — [white_runtime, black_runtime].
+## Each element is a plain Dictionary { "charges": int, "recharge": int }.
+## (We use a Dictionary instead of a custom class to avoid a Godot 4.6
+## class_name resolution quirk that only manifests for newly-added files.)
+var cannon_state: Array = []
+var lightning_state: Array = []
 
 func clone_state() -> GameState:
 	var c := GameState.new()
@@ -37,6 +39,6 @@ func clone_state() -> GameState:
 		initial_squares_by_color[0].duplicate(),
 		initial_squares_by_color[1].duplicate(),
 	]
-	for rt in cannon_state:    c.cannon_state.append(rt.clone())
-	for rt in lightning_state: c.lightning_state.append(rt.clone())
+	for rt in cannon_state:    c.cannon_state.append((rt as Dictionary).duplicate())
+	for rt in lightning_state: c.lightning_state.append((rt as Dictionary).duplicate())
 	return c
