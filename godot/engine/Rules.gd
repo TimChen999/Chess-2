@@ -644,8 +644,11 @@ static func _tick_ability_recharge(state: GameState) -> void:
 
 static func _tick_one_runtime(rt: Dictionary, spec: SpecialAbilityDef) -> void:
 	if rt == null or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return
-	if rt["recharge"] > 0: rt["recharge"] -= 1
-	if rt["recharge"] == 0 and rt["charges"] < spec.max_charges:
+	## At-cap: don't tick. Keeps the UI progress bar from drifting past full
+	## when charges are saturated.
+	if int(rt["charges"]) >= spec.max_charges: return
+	if int(rt["recharge"]) > 0: rt["recharge"] -= 1
+	if int(rt["recharge"]) == 0:
 		rt["charges"] += 1
 		rt["recharge"] = spec.cooldown_turns
 
@@ -765,6 +768,9 @@ static func game_status(state: GameState) -> Dictionary:
 ##   Lightning → [{ sq: int }, ...]                    enemy non-royal squares
 static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 	if state.special_used_this_turn: return []
+	## Only the enabled ability is usable in-game. The other spec is kept on
+	## GameConfig so customization edits aren't lost when the player toggles.
+	if state.config.enabled_ability != ability_kind: return []
 	var color := state.side
 	var rt: Dictionary = _runtime_for(state, color, ability_kind)
 	var spec := _spec_for(state, ability_kind)
@@ -830,6 +836,7 @@ static func cannon_plus_squares(center_sq: int) -> Array[int]:
 static func validate_ability(state: GameState, action: Dictionary) -> String:
 	if state.special_used_this_turn: return "already used ability this turn"
 	var kind: int = int(action["kind"])
+	if state.config.enabled_ability != kind:     return "ability not enabled"
 	var color := state.side
 	var rt: Dictionary = _runtime_for(state, color, kind)
 	var spec := _spec_for(state, kind)

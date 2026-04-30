@@ -26,7 +26,7 @@ var editor_pane: VBoxContainer
 func _ready() -> void:
     working = _clone_config(GameSettings.active_config)
     if working.pieces.size() > 0:
-        current_id = working.pieces.keys()[0]
+        current_id = "piece:" + working.pieces.keys()[0]
     _build_ui()
     _populate_piece_list()
     _render_editor()
@@ -86,6 +86,8 @@ func _build_ui() -> void:
     editor_pane.add_theme_constant_override("separation", 12)
     scroll.add_child(editor_pane)
 
+## List entries are tagged: "piece:<id>" or "ability:cannon" / "ability:lightning".
+## current_id stores the same tagged string.
 func _populate_piece_list() -> void:
     piece_list.clear()
     var idx := 0
@@ -93,9 +95,25 @@ func _populate_piece_list() -> void:
     for id in working.pieces.keys():
         var def: PieceDef = working.pieces[id]
         piece_list.add_item("%s  %s" % [def.glyph, def.display_name])
-        piece_list.set_item_metadata(idx, id)
-        if id == current_id: sel_idx = idx
+        piece_list.set_item_metadata(idx, "piece:" + id)
+        if "piece:" + id == current_id: sel_idx = idx
         idx += 1
+
+    ## Ability entries — each one a separate "page" so edits don't pile up
+    ## under whichever piece happens to be selected.
+    var enabled := working.enabled_ability if working != null else 0
+    var cannon_marker := "✓ " if enabled == SpecialAbilityDef.Kind.CANNON else "  "
+    piece_list.add_item("%s◎  Cannon" % cannon_marker)
+    piece_list.set_item_metadata(idx, "ability:cannon")
+    if "ability:cannon" == current_id: sel_idx = idx
+    idx += 1
+
+    var light_marker := "✓ " if enabled == SpecialAbilityDef.Kind.LIGHTNING else "  "
+    piece_list.add_item("%s⚡  Lightning" % light_marker)
+    piece_list.set_item_metadata(idx, "ability:lightning")
+    if "ability:lightning" == current_id: sel_idx = idx
+    idx += 1
+
     if piece_list.item_count > 0:
         piece_list.select(sel_idx)
 
@@ -109,16 +127,18 @@ func _on_piece_selected(idx: int) -> void:
 
 func _render_editor() -> void:
     for c in editor_pane.get_children(): c.queue_free()
-    if not working.pieces.has(current_id): return
-    _def = working.pieces[current_id]
+    if current_id.begins_with("ability:"):
+        _render_ability_editor(current_id.substr(8))
+        return
+    if not current_id.begins_with("piece:"): return
+    var piece_id := current_id.substr(6)
+    if not working.pieces.has(piece_id): return
+    _def = working.pieces[piece_id]
     if _def.on_hit == null:
         var oh := StatusEffectDef.new()
         oh.kind = StatusEffectDef.Kind.NONE
         _def.on_hit = oh
     _toggles = _infer_toggles(_def)
-
-    ## --- Player Abilities (global; same UI regardless of selected piece) ---
-    editor_pane.add_child(_build_player_abilities_section())
 
     # --- Identity ---
     var sec := _section("Identity")
@@ -214,43 +234,87 @@ func _on_onhit_dpt_changed(v: int) -> void:      _def.on_hit.damage_per_turn = v
 func _on_onhit_duration_changed(v: int) -> void: _def.on_hit.duration = v
 
 ## ===========================================================================
-## Player Abilities section — edits working.cannon and working.lightning.
+## ABILITY EDITOR — its own page in the master/detail. Each ability is shown
+## independently (Cannon and Lightning are separate selectable entries in the
+## piece list). One ability is "active" per game; the other's settings are
+## still kept around so toggling back doesn't lose customization.
 ## ===========================================================================
 
-func _build_player_abilities_section() -> VBoxContainer:
-    var sec := _section("Player Abilities (shared between both players)")
-    if working.cannon == null:
-        working.cannon = Defaults.make_special(SpecialAbilityDef.Kind.CANNON, 2, 4, 1, 0)
-    if working.lightning == null:
-        working.lightning = Defaults.make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
-
-    sec.add_child(_ability_card("◎ Cannon (delayed plus AOE)", working.cannon, true))
-    sec.add_child(_ability_card("⚡ Lightning (instant single-target)", working.lightning, false))
-    return sec
-
-func _ability_card(title: String, spec: SpecialAbilityDef, is_cannon: bool) -> VBoxContainer:
-    var v := VBoxContainer.new()
-    v.add_theme_constant_override("separation", 4)
-    var heading := Label.new()
-    heading.text = title
-    heading.add_theme_font_size_override("font_size", 13)
-    v.add_child(heading)
-
-    if is_cannon:
-        v.add_child(_int_field("Damage",          spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
-        v.add_child(_int_field("Cooldown",        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
-        v.add_child(_int_field("Max charges",     spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
-        v.add_child(_int_field("Initial charges", spec.initial_charges, 0,
-                               max(spec.max_charges, 0),
-                               _ability_setter.bind(spec, "initial_charges")))
+func _render_ability_editor(which: String) -> void:
+    var kind: int
+    var heading: String
+    var description: String
+    var spec: SpecialAbilityDef
+    if which == "cannon":
+        kind = SpecialAbilityDef.Kind.CANNON
+        heading = "◎  Cannon"
+        description = "Plus-shape AOE attack queued one turn ahead. " \
+                    + "Cannot target squares the enemy started on."
+        if working.cannon == null:
+            working.cannon = Defaults.make_special(SpecialAbilityDef.Kind.CANNON, 2, 4, 1, 0)
+        spec = working.cannon
     else:
-        v.add_child(_int_field("Damage",          spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
-        v.add_child(_int_field("Cooldown",        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
-        v.add_child(_int_field("Max charges",     spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
-        v.add_child(_int_field("Initial charges", spec.initial_charges, 0,
-                               max(spec.max_charges, 0),
-                               _ability_setter.bind(spec, "initial_charges")))
-    return v
+        kind = SpecialAbilityDef.Kind.LIGHTNING
+        heading = "⚡  Lightning"
+        description = "Instant single-target damage. Cannot target the royal piece."
+        if working.lightning == null:
+            working.lightning = Defaults.make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
+        spec = working.lightning
+
+    var title := Label.new()
+    title.text = heading
+    title.add_theme_font_size_override("font_size", 22)
+    editor_pane.add_child(title)
+
+    var blurb := Label.new()
+    blurb.text = description
+    blurb.modulate = Color(1, 1, 1, 0.65)
+    blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    editor_pane.add_child(blurb)
+
+    ## Active toggle. Only one ability can be active per game; toggling this
+    ## one ON disables the other.
+    var active_box := HBoxContainer.new()
+    active_box.add_theme_constant_override("separation", 8)
+    var cb := CheckBox.new()
+    cb.button_pressed = (working.enabled_ability == kind)
+    cb.text = "Use this ability in the current game"
+    cb.toggled.connect(_on_active_ability_toggled.bind(kind))
+    active_box.add_child(cb)
+    editor_pane.add_child(active_box)
+
+    var sep := HSeparator.new()
+    editor_pane.add_child(sep)
+
+    var stats := _section("Parameters")
+    stats.add_child(_int_field("Damage",
+        spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
+    stats.add_child(_int_field("Cooldown (turns)",
+        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
+    stats.add_child(_int_field("Max charges",
+        spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
+    stats.add_child(_int_field("Initial charges",
+        spec.initial_charges, 0, max(spec.max_charges, 0),
+        _ability_setter.bind(spec, "initial_charges")))
+    editor_pane.add_child(stats)
+
+    ## Footer reset button works for either pieces or abilities.
+    var footer := HBoxContainer.new()
+    footer.add_theme_constant_override("separation", 8)
+    var btn_reset := Button.new()
+    btn_reset.text = "Reset this ability to default"
+    btn_reset.pressed.connect(_on_reset_this)
+    footer.add_child(btn_reset)
+    editor_pane.add_child(footer)
+
+func _on_active_ability_toggled(pressed: bool, kind: int) -> void:
+    if pressed:
+        working.enabled_ability = kind
+    elif working.enabled_ability == kind:
+        ## Allow turning the active one off — falls back to NONE.
+        working.enabled_ability = SpecialAbilityDef.Kind.NONE
+    _populate_piece_list()
+    _render_editor()
 
 ## Generic int-setter. Bound args (spec, field_name) come AFTER the new value
 ## per Callable.bind semantics — Godot 4 appends bound args after call args.
@@ -262,15 +326,21 @@ func _ability_setter(value: int, spec: SpecialAbilityDef, field: String) -> void
 
 func _on_reset_this() -> void:
     var fresh := Defaults.make_default_config()
-    if fresh.pieces.has(current_id):
-        working.pieces[current_id] = fresh.pieces[current_id]
-        _populate_piece_list()
-        _render_editor()
+    if current_id.begins_with("piece:"):
+        var piece_id := current_id.substr(6)
+        if fresh.pieces.has(piece_id):
+            working.pieces[piece_id] = fresh.pieces[piece_id]
+    elif current_id == "ability:cannon":
+        working.cannon = _clone_special(fresh.cannon)
+    elif current_id == "ability:lightning":
+        working.lightning = _clone_special(fresh.lightning)
+    _populate_piece_list()
+    _render_editor()
 
 func _on_reset_all() -> void:
     working = Defaults.make_default_config()
     if working.pieces.size() > 0:
-        current_id = working.pieces.keys()[0]
+        current_id = "piece:" + working.pieces.keys()[0]
     _populate_piece_list()
     _render_editor()
 
@@ -508,6 +578,7 @@ func _clone_config(src: GameConfig) -> GameConfig:
     dst.initial_setup = src.initial_setup.duplicate(true)
     if src.cannon != null:    dst.cannon    = _clone_special(src.cannon)
     if src.lightning != null: dst.lightning = _clone_special(src.lightning)
+    dst.enabled_ability = src.enabled_ability
     return dst
 
 func _clone_special(s: SpecialAbilityDef) -> SpecialAbilityDef:

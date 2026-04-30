@@ -45,6 +45,12 @@ const ANIM_MOVE_DURATION   := 0.26
 const ANIM_DAMAGE_DURATION := 0.16
 const ANIM_KILL_DURATION   := 0.24
 const ANIM_HIT_DURATION    := 0.4
+## Attack timing — anticipation pull-back, lunge to overshoot, settle into
+## target square. Damage/push/kill effects are delayed to land at T_IMPACT.
+const T_ANTICIPATE := 0.07
+const T_LUNGE      := 0.15
+const T_SETTLE     := 0.07
+const T_IMPACT     := 0.20
 var _animating: bool = false
 
 func _ready() -> void:
@@ -362,6 +368,14 @@ func _render() -> void:
 func _render_ability_bar() -> void:
     for c in ability_bar.get_children(): c.queue_free()
 
+    var enabled := state.config.enabled_ability
+    if enabled == SpecialAbilityDef.Kind.NONE:
+        var note := Label.new()
+        note.text = "No active ability for this game"
+        note.modulate = Color(1, 1, 1, 0.45)
+        ability_bar.add_child(note)
+        return
+
     if state.special_used_this_turn:
         var note := Label.new()
         note.text = "Ability used this turn"
@@ -369,42 +383,75 @@ func _render_ability_bar() -> void:
         ability_bar.add_child(note)
         return
 
+    ## Only the enabled ability's card renders. Render runs every turn so
+    ## the progress bar visibly fills as recharge ticks down.
     var color := state.side
-    var found := 0
-    found += _add_ability_button(SpecialAbilityDef.Kind.CANNON,
-                                 "Cannon", "◎",
-                                 state.config.cannon,
-                                 state.cannon_state[color] if color < state.cannon_state.size() else null)
-    found += _add_ability_button(SpecialAbilityDef.Kind.LIGHTNING,
-                                 "Lightning", "⚡",
-                                 state.config.lightning,
-                                 state.lightning_state[color] if color < state.lightning_state.size() else null)
+    if enabled == SpecialAbilityDef.Kind.CANNON:
+        _add_ability_button(SpecialAbilityDef.Kind.CANNON,
+                            "Cannon", "◎",
+                            state.config.cannon,
+                            state.cannon_state[color] if color < state.cannon_state.size() else null)
+    elif enabled == SpecialAbilityDef.Kind.LIGHTNING:
+        _add_ability_button(SpecialAbilityDef.Kind.LIGHTNING,
+                            "Lightning", "⚡",
+                            state.config.lightning,
+                            state.lightning_state[color] if color < state.lightning_state.size() else null)
 
-    if found == 0:
-        var note := Label.new()
-        note.text = "No abilities ready"
-        note.modulate = Color(1, 1, 1, 0.45)
-        ability_bar.add_child(note)
-
+## Builds a multi-row ability "card": a clickable button (icon + name +
+## charges) over a progress bar that fills from 0 to spec.cooldown_turns
+## as the next charge ticks in. When charges are at max, the bar shows
+## "MAX" and is fully filled.
 func _add_ability_button(kind: int, label: String, icon: String,
                          spec: SpecialAbilityDef, rt) -> int:
     if spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return 0
     if rt == null or not (rt is Dictionary): return 0
-    var btn := Button.new()
     var charges: int  = int(rt["charges"])
     var recharge: int = int(rt["recharge"])
-    var has_charges := charges > 0
-    if has_charges:
-        btn.text = "%s %s (%d)" % [icon, label, charges]
-    else:
-        btn.text = "%s %s · in %d" % [icon, label, recharge]
-        btn.disabled = true
+    var maxc: int     = spec.max_charges
+    var cooldown: int = spec.cooldown_turns
+    var at_max := charges >= maxc
+
+    var card := VBoxContainer.new()
+    card.add_theme_constant_override("separation", 4)
+    card.custom_minimum_size = Vector2(220, 0)
+
+    var btn := Button.new()
+    btn.text = "%s  %s   %d / %d" % [icon, label, charges, maxc]
+    btn.disabled = (charges <= 0)
     btn.tooltip_text = _describe_ability(spec)
     if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
-        btn.modulate = Color(0.7, 0.9, 1.2)
+        btn.modulate = Color(0.75, 0.95, 1.25)
     btn.pressed.connect(_on_ability_button_clicked.bind(kind))
-    ability_bar.add_child(btn)
-    return 1 if has_charges else 0
+    card.add_child(btn)
+
+    var bar_row := HBoxContainer.new()
+    bar_row.add_theme_constant_override("separation", 6)
+
+    var bar := ProgressBar.new()
+    bar.show_percentage = false
+    bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    bar.custom_minimum_size = Vector2(0, 10)
+    bar.max_value = max(cooldown, 1)
+    if at_max:
+        bar.value = bar.max_value
+        bar.modulate = Color(0.55, 0.95, 0.6)
+    else:
+        bar.value = max(cooldown - recharge, 0)
+    bar_row.add_child(bar)
+
+    var note := Label.new()
+    note.add_theme_font_size_override("font_size", 11)
+    if at_max:
+        note.text = "MAX"
+        note.modulate = Color(0.55, 0.95, 0.6)
+    else:
+        note.text = "next in %d" % max(recharge, 1)
+        note.modulate = Color(1, 1, 1, 0.7)
+    bar_row.add_child(note)
+
+    card.add_child(bar_row)
+    ability_bar.add_child(card)
+    return 1 if charges > 0 else 0
 
 func _describe_ability(spec: SpecialAbilityDef) -> String:
     if spec.kind == SpecialAbilityDef.Kind.CANNON:
@@ -629,66 +676,140 @@ func _animate_events(old_state: GameState, events: Array) -> void:
             floats.append(lbl)
             floats_by_sq[sq] = lbl
 
-    ## Pass 2 — schedule tweens. set_parallel(true) makes everything run
-    ## simultaneously so the attacker slides while the target gets pushed
-    ## while the damage flash plays.
+    ## Detect whether any of this turn's move events is an attack — those get
+    ## a 3-phase anticipate/lunge/settle animation, with damage flashes and
+    ## push slides delayed to land at impact moment.
+    var has_attack := false
+    for ev in events:
+        if String(ev.get("kind", "")) == "move":
+            var to_sq := int(ev["to"])
+            if old_state.board[to_sq] != null:
+                has_attack = true
+                break
+
+    ## Attack timing (used when has_attack), defined at module scope:
+    ##   t = 0.00 .. 0.07  attacker pulls back ~10px (anticipation)
+    ##   t = 0.07 .. 0.22  attacker lunges past target into overshoot pos
+    ##   t = 0.20          IMPACT — burst FX, target whiteout, push starts
+    ##   t = 0.22 .. 0.29  attacker settles into target square
+    ##   t = 0.20 .. 0.40  target push slide / kill fade
+
     var tween := create_tween().set_parallel(true)
     var any := false
+
     for ev in events:
-        var k = String(ev.get("kind", ""))
+        var k := String(ev.get("kind", ""))
         if k == "move" or k == "push":
             var from_sq := int(ev["from"])
             var to_sq := int(ev["to"])
-            if floats_by_sq.has(from_sq):
-                var lbl: Label = floats_by_sq[from_sq]
-                tween.tween_property(lbl, "position", _sq_to_pos(to_sq),
-                    ANIM_MOVE_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-                ## Sense of impact for moves into an enemy square — quick
-                ## scale bump near arrival. (Push events skip this; the
-                ## attacker is the one delivering impact.)
-                if k == "move" and old_state.board[to_sq] != null:
-                    var bump := ANIM_MOVE_DURATION * 0.78
-                    tween.tween_property(lbl, "scale", Vector2(1.18, 1.18), 0.06).set_delay(bump)
-                    tween.tween_property(lbl, "scale", Vector2(1.0, 1.0), 0.08).set_delay(bump + 0.06)
-                any = true
+            if not floats_by_sq.has(from_sq): continue
+            var lbl: Label = floats_by_sq[from_sq]
+            var from_pos := _sq_to_pos(from_sq)
+            var to_pos := _sq_to_pos(to_sq)
+            var is_attack := (k == "move") and (old_state.board[to_sq] != null)
+
+            if is_attack:
+                ## ANTICIPATE — small pull-back, opposite of the attack vector.
+                var dir := (to_pos - from_pos)
+                var dlen := dir.length()
+                var unit := dir / dlen if dlen > 0.001 else Vector2.ZERO
+                var anticipate_pos := from_pos - unit * 10.0
+                var overshoot_pos  := to_pos   + unit * 10.0
+                tween.tween_property(lbl, "position", anticipate_pos, T_ANTICIPATE) \
+                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+                ## LUNGE — fast, accelerating, slightly past the target square.
+                tween.tween_property(lbl, "position", overshoot_pos, T_LUNGE) \
+                    .set_delay(T_ANTICIPATE) \
+                    .set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+                ## SETTLE — snap-back to actual target square.
+                tween.tween_property(lbl, "position", to_pos, T_SETTLE) \
+                    .set_delay(T_ANTICIPATE + T_LUNGE) \
+                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+
+                ## IMPACT BURST — sprite at target square; spawn pre-hidden,
+                ## scale up + spin + fade in/out. Pure Tween, no particles.
+                var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
+                floats.append(fx)
+                fx.scale = Vector2(0.25, 0.25)
+                fx.modulate.a = 0.0
+                tween.tween_property(fx, "modulate:a", 1.0, 0.05).set_delay(T_IMPACT)
+                tween.tween_property(fx, "scale", Vector2(2.6, 2.6), 0.22) \
+                    .set_delay(T_IMPACT) \
+                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+                tween.tween_property(fx, "modulate:a", 0.0, 0.18) \
+                    .set_delay(T_IMPACT + 0.10)
+                tween.tween_property(fx, "rotation", 0.65, 0.22).set_delay(T_IMPACT)
+            else:
+                ## Plain slide — non-attack move or chain push (which gets a
+                ## brief delay so it visually starts at impact moment).
+                var delay := T_IMPACT if (k == "push" and has_attack) else 0.0
+                var dur := ANIM_MOVE_DURATION
+                tween.tween_property(lbl, "position", to_pos, dur) \
+                    .set_delay(delay) \
+                    .set_trans(Tween.TRANS_BACK if k == "push" else Tween.TRANS_QUAD) \
+                    .set_ease(Tween.EASE_OUT)
+            any = true
+
         elif k == "damage":
             var sq := int(ev["sq"])
             var target_lbl: Label = floats_by_sq.get(sq, null)
             if target_lbl == null:
-                ## Target wasn't already floating — give it a floating clone.
+                ## Damaged piece isn't being moved — give it a floating clone
+                ## so we can flash and shake without touching the static cell.
                 var p = old_state.board[sq]
                 if p == null: continue
                 hidden.append(_hide_static_glyph(sq))
                 target_lbl = _create_floating_piece(p, sq)
                 floats.append(target_lbl)
-            tween.tween_property(target_lbl, "modulate", Color(1.6, 0.35, 0.35),
-                ANIM_DAMAGE_DURATION * 0.4)
-            tween.tween_property(target_lbl, "modulate", Color.WHITE,
-                ANIM_DAMAGE_DURATION * 0.6).set_delay(ANIM_DAMAGE_DURATION * 0.4)
+            var delay: float = T_IMPACT if has_attack else 0.0
+            ## WHITEOUT then RED then back. The whiteout cue is the impact.
+            tween.tween_property(target_lbl, "modulate", Color(2.5, 2.5, 2.5), 0.04) \
+                .set_delay(delay)
+            tween.tween_property(target_lbl, "modulate", Color(1.7, 0.4, 0.4), 0.06) \
+                .set_delay(delay + 0.04)
+            tween.tween_property(target_lbl, "modulate", Color.WHITE, 0.10) \
+                .set_delay(delay + 0.10)
             any = true
+
         elif k == "kill":
             var sq := int(ev["sq"])
             if floats_by_sq.has(sq):
                 var lbl: Label = floats_by_sq[sq]
-                tween.tween_property(lbl, "scale", Vector2(0.25, 0.25), ANIM_KILL_DURATION)
-                tween.tween_property(lbl, "modulate:a", 0.0, ANIM_KILL_DURATION)
+                var delay: float = T_IMPACT if has_attack else 0.0
+                tween.tween_property(lbl, "scale", Vector2(0.25, 0.25),
+                    ANIM_KILL_DURATION).set_delay(delay)
+                tween.tween_property(lbl, "modulate:a", 0.0,
+                    ANIM_KILL_DURATION).set_delay(delay)
                 any = true
+
         elif k == "lightning":
             var sq := int(ev["target"])
-            var fx := _create_fx_label("⚡", sq, Color(0.85, 0.95, 1.2))
-            floats.append(fx)
-            fx.scale = Vector2(0.3, 0.3)
-            tween.tween_property(fx, "scale", Vector2(2.0, 2.0), ANIM_HIT_DURATION * 0.85).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-            tween.tween_property(fx, "modulate:a", 0.0, ANIM_HIT_DURATION * 0.6).set_delay(ANIM_HIT_DURATION * 0.4)
+            ## Two-pass burst: a bright ring + the bolt glyph. Together they
+            ## sell the strike better than a single sprite.
+            var ring := _create_fx_label("✺", sq, Color(0.7, 0.85, 1.5))
+            floats.append(ring)
+            ring.scale = Vector2(0.2, 0.2)
+            tween.tween_property(ring, "scale", Vector2(2.4, 2.4), 0.30) \
+                .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+            tween.tween_property(ring, "modulate:a", 0.0, 0.30).set_delay(0.10)
+
+            var bolt := _create_fx_label("⚡", sq, Color(0.95, 1.0, 1.4))
+            floats.append(bolt)
+            bolt.scale = Vector2(0.4, 0.4)
+            tween.tween_property(bolt, "scale", Vector2(1.9, 1.9), 0.18) \
+                .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+            tween.tween_property(bolt, "modulate:a", 0.0, 0.20).set_delay(0.20)
             any = true
+
         elif k == "cannonResolved":
             for raw in ev.get("target", []):
                 var sq := int(raw)
                 var fx := _create_fx_label("💥", sq, Color(1.0, 0.7, 0.4))
                 floats.append(fx)
-                fx.scale = Vector2(0.4, 0.4)
-                tween.tween_property(fx, "scale", Vector2(1.7, 1.7), ANIM_HIT_DURATION * 0.7)
-                tween.tween_property(fx, "modulate:a", 0.0, ANIM_HIT_DURATION * 0.5).set_delay(ANIM_HIT_DURATION * 0.5)
+                fx.scale = Vector2(0.3, 0.3)
+                tween.tween_property(fx, "scale", Vector2(1.85, 1.85), 0.30) \
+                    .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+                tween.tween_property(fx, "modulate:a", 0.0, 0.28).set_delay(0.22)
             any = true
 
     if any:

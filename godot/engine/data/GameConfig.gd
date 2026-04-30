@@ -17,3 +17,12 @@ extends Resource
 ## lightning_state). Either field can be null to disable that ability.
 @export var cannon: SpecialAbilityDef
 @export var lightning: SpecialAbilityDef
+
+## Which ability is active for this game. Both ability specs above are kept
+## around so customization edits don't get lost when the player switches
+## the active one, but only the enabled kind appears in the in-game ability
+## bar and is accepted by Rules.validate_ability.
+##   0 = SpecialAbilityDef.Kind.NONE        (no ability)
+##   1 = SpecialAbilityDef.Kind.CANNON
+##   2 = SpecialAbilityDef.Kind.LIGHTNING
+@export var enabled_ability: int = 2

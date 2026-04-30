@@ -131,8 +131,10 @@ static func make_default_config() -> GameConfig:
 
 	## Global abilities — both players share these specs but each has their
 	## own runtime charges (GameState.cannon_state / .lightning_state).
+	## Only one of them is active at a time per cfg.enabled_ability.
 	cfg.cannon    = make_special(SpecialAbilityDef.Kind.CANNON,    2, 4, 1, 0)
 	cfg.lightning = make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
+	cfg.enabled_ability = SpecialAbilityDef.Kind.LIGHTNING
 
 	## Standard opening setup. Index 0 = a1.
 	var back: Array[String] = ["rook","knight","bishop","queen","king","bishop","knight","rook"]
