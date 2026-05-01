@@ -14,6 +14,11 @@ func _load_or_default() -> GameConfig:
     if ResourceLoader.exists(SAVE_PATH):
         var loaded = ResourceLoader.load(SAVE_PATH)
         if loaded is GameConfig:
+            ## Old saves predating the variant system won't have
+            ## variant_selection populated. rebuild_initial_setup is
+            ## idempotent and falls back to default selections in that
+            ## case (PIECE-VARIANTS.md §5.3).
+            loaded.rebuild_initial_setup()
             return loaded
         push_warning("GameSettings: customizations.tres present but not GameConfig; using defaults")
     return Defaults.make_default_config()

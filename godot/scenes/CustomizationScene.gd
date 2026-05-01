@@ -1,35 +1,29 @@
-## CustomizationScene — master/detail piece editor (IMPL-GODOT §11).
+## CustomizationScene — variant picker (PIECE-VARIANTS.md §5.1).
 ##
-## Edits a *working copy* of GameSettings.active_config. Save commits +
-## persists; Cancel discards. Movement is exposed as toggle presets that
-## compose into MovePattern arrays — raw pattern records aren't editable.
+## Replaces the legacy granular per-piece editor with a slot-based variant
+## picker. Each slot (pawn / bishop / knight / rook / queen / king) shows
+## one card per available variant with a live sprite, stat readout, and
+## one-line move description. Picking a card sets variant_selection[slot]
+## on the working config; Save commits + persists.
 ##
-## All edit handlers are explicit methods (not inline lambdas) so the
-## GDScript parser stays happy and the call graph is grep-able.
+## Ability editor stays — abilities are global and orthogonal to piece
+## variants. It lives at the bottom of the same scroll view.
 extends Control
 
 signal back_to_menu
 
-# Edit context — set by _render_editor() before any handler can fire.
+# Working copy — Save commits to GameSettings.active_config; Cancel discards.
 var working: GameConfig
-var current_id: String = ""
-var _def: PieceDef                   ## piece being edited (alias into working)
-var _toggles: Dictionary = {         ## movement toggle state
-    "ortho": false, "diag": false, "range": 0,
-    "knight": false, "king": false, "pawn": false,
-}
+var _variants_by_slot: Dictionary = {}    ## slot -> Array[PieceDef]
 
 # UI refs.
-var piece_list: ItemList
-var editor_pane: VBoxContainer
+var content_pane: VBoxContainer
 
 func _ready() -> void:
     working = _clone_config(GameSettings.active_config)
-    if working.pieces.size() > 0:
-        current_id = "piece:" + working.pieces.keys()[0]
+    _variants_by_slot = Defaults.make_variants_map()
     _build_ui()
-    _populate_piece_list()
-    _render_editor()
+    _populate_content()
 
 # ============================================================================
 # UI construction
@@ -66,287 +60,223 @@ func _build_ui() -> void:
     btn_save.pressed.connect(_on_save)
     header.add_child(btn_save)
 
-    var body := HSplitContainer.new()
-    body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    body.split_offset = 220
-    root.add_child(body)
-
-    piece_list = ItemList.new()
-    piece_list.custom_minimum_size = Vector2(220, 0)
-    piece_list.item_selected.connect(_on_piece_selected)
-    body.add_child(piece_list)
-
     var scroll := ScrollContainer.new()
     scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
     scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    body.add_child(scroll)
+    root.add_child(scroll)
 
-    editor_pane = VBoxContainer.new()
-    editor_pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    editor_pane.add_theme_constant_override("separation", 12)
-    scroll.add_child(editor_pane)
-
-## List entries are tagged: "piece:<id>" or "ability:cannon" / "ability:lightning".
-## current_id stores the same tagged string.
-func _populate_piece_list() -> void:
-    piece_list.clear()
-    var idx := 0
-    var sel_idx := 0
-    for id in working.pieces.keys():
-        var def: PieceDef = working.pieces[id]
-        piece_list.add_item("%s  %s" % [def.glyph, def.display_name])
-        piece_list.set_item_metadata(idx, "piece:" + id)
-        if "piece:" + id == current_id: sel_idx = idx
-        idx += 1
-
-    ## Ability entries — each one a separate "page" so edits don't pile up
-    ## under whichever piece happens to be selected.
-    var enabled := working.enabled_ability if working != null else 0
-    var cannon_marker := "✓ " if enabled == SpecialAbilityDef.Kind.CANNON else "  "
-    piece_list.add_item("%s◎  Cannon" % cannon_marker)
-    piece_list.set_item_metadata(idx, "ability:cannon")
-    if "ability:cannon" == current_id: sel_idx = idx
-    idx += 1
-
-    var light_marker := "✓ " if enabled == SpecialAbilityDef.Kind.LIGHTNING else "  "
-    piece_list.add_item("%s⚡  Lightning" % light_marker)
-    piece_list.set_item_metadata(idx, "ability:lightning")
-    if "ability:lightning" == current_id: sel_idx = idx
-    idx += 1
-
-    if piece_list.item_count > 0:
-        piece_list.select(sel_idx)
-
-func _on_piece_selected(idx: int) -> void:
-    current_id = piece_list.get_item_metadata(idx)
-    _render_editor()
+    content_pane = VBoxContainer.new()
+    content_pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    content_pane.add_theme_constant_override("separation", 14)
+    scroll.add_child(content_pane)
 
 # ============================================================================
-# EDITOR PANE
+# Variant picker grid
 # ============================================================================
 
-func _render_editor() -> void:
-    for c in editor_pane.get_children(): c.queue_free()
-    if current_id.begins_with("ability:"):
-        _render_ability_editor(current_id.substr(8))
-        return
-    if not current_id.begins_with("piece:"): return
-    var piece_id := current_id.substr(6)
-    if not working.pieces.has(piece_id): return
-    _def = working.pieces[piece_id]
-    if _def.on_hit == null:
-        var oh := StatusEffectDef.new()
-        oh.kind = StatusEffectDef.Kind.NONE
-        _def.on_hit = oh
-    _toggles = _infer_toggles(_def)
+func _populate_content() -> void:
+    for c in content_pane.get_children(): c.queue_free()
 
-    # --- Identity ---
-    var sec := _section("Identity")
-    sec.add_child(_text_field("Name",  _def.display_name, _on_name_changed))
-    sec.add_child(_text_field("Glyph", _def.glyph,        _on_glyph_changed))
-    editor_pane.add_child(sec)
+    ## One row per slot, in the canonical order from Defaults.
+    for slot in Defaults.variant_slots():
+        content_pane.add_child(_build_slot_section(slot))
 
-    # --- Stats ---
-    var stats := _section("Stats")
-    stats.add_child(_int_field("HP",     _def.hp,     1, 10, _on_hp_changed))
-    stats.add_child(_int_field("Damage", _def.damage, 1,  5, _on_damage_changed))
-    editor_pane.add_child(stats)
+    ## Ability sub-pages — one per ability. Stays editable; orthogonal to
+    ## piece variants.
+    var ability_header := Label.new()
+    ability_header.text = "Abilities"
+    ability_header.add_theme_font_size_override("font_size", 18)
+    ability_header.modulate = Color(0.95, 0.88, 0.74)
+    content_pane.add_child(ability_header)
 
-    # --- Movement ---
-    var move := _section("Movement")
-    move.add_child(_check_field("Slides orthogonally", _toggles["ortho"],
-        _on_toggle_changed.bind("ortho")))
-    move.add_child(_check_field("Slides diagonally",   _toggles["diag"],
-        _on_toggle_changed.bind("diag")))
-    move.add_child(_int_field("Range limit (0 = unlimited)",
-        _toggles["range"], 0, 7, _on_range_changed))
-    move.add_child(_check_field("Knight leap",         _toggles["knight"],
-        _on_toggle_changed.bind("knight")))
-    move.add_child(_check_field("One step any direction", _toggles["king"],
-        _on_toggle_changed.bind("king")))
-    move.add_child(_check_field("Pawn-like (push + diagonal capture)",
-        _toggles["pawn"], _on_toggle_changed.bind("pawn")))
-    editor_pane.add_child(move)
+    content_pane.add_child(_build_ability_section(SpecialAbilityDef.Kind.CANNON))
+    content_pane.add_child(_build_ability_section(SpecialAbilityDef.Kind.LIGHTNING))
 
-    # --- Reachability preview ---
-    var reach := _section("Reachability preview (centered piece)")
-    reach.add_child(_build_reach_grid(_def))
-    editor_pane.add_child(reach)
+func _build_slot_section(slot: String) -> Control:
+    var sec := VBoxContainer.new()
+    sec.add_theme_constant_override("separation", 4)
 
-    # --- On-hit effect ---
-    var onhit := _section("On-hit status effect")
-    onhit.add_child(_select_field("Kind", _def.on_hit.kind, [
-        ["None",   StatusEffectDef.Kind.NONE],
-        ["Burn",   StatusEffectDef.Kind.BURN],
-        ["Freeze", StatusEffectDef.Kind.FREEZE],
-    ], _on_onhit_kind_changed))
-    if _def.on_hit.kind == StatusEffectDef.Kind.BURN:
-        onhit.add_child(_int_field("Damage per turn",
-            max(1, _def.on_hit.damage_per_turn), 1, 5, _on_onhit_dpt_changed))
-    if _def.on_hit.kind == StatusEffectDef.Kind.BURN \
-       or _def.on_hit.kind == StatusEffectDef.Kind.FREEZE:
-        onhit.add_child(_int_field("Duration (turns)",
-            max(1, _def.on_hit.duration), 1, 10, _on_onhit_duration_changed))
-    editor_pane.add_child(onhit)
+    var heading := Label.new()
+    heading.text = _slot_display_name(slot)
+    heading.add_theme_font_size_override("font_size", 16)
+    heading.modulate = Color(0.95, 0.88, 0.74)
+    sec.add_child(heading)
 
-    ## (Special abilities live on GameConfig, not on individual pieces — see
-    ## the "Player Abilities" section at the top of this pane.)
+    var row := HBoxContainer.new()
+    row.add_theme_constant_override("separation", 8)
+    sec.add_child(row)
 
-    # --- Footer ---
-    var footer := HBoxContainer.new()
-    footer.add_theme_constant_override("separation", 8)
-    var btn_reset := Button.new()
-    btn_reset.text = "Reset this piece to default"
-    btn_reset.pressed.connect(_on_reset_this)
-    footer.add_child(btn_reset)
-    editor_pane.add_child(footer)
+    var variants: Array = _variants_by_slot.get(slot, [])
+    var current_id: String = String(working.variant_selection.get(slot, slot))
+    for def in variants:
+        row.add_child(_build_variant_card(slot, def, def.id == current_id))
+
+    return sec
+
+## One picker card. Click anywhere on the card to select that variant.
+## Selected card has a highlighted border. Single-variant slots still get
+## a card so the player understands the slot is fixed.
+func _build_variant_card(slot: String, def: PieceDef, selected: bool) -> Control:
+    var card := PanelContainer.new()
+    card.custom_minimum_size = Vector2(180, 150)
+    var sb := StyleBoxFlat.new()
+    sb.bg_color = Color(0.10, 0.08, 0.10)
+    sb.border_color = Color(0.95, 0.88, 0.74) if selected else Color(0.30, 0.25, 0.30)
+    sb.set_border_width_all(3 if selected else 2)
+    sb.set_corner_radius_all(0)
+    sb.set_content_margin_all(6)
+    card.add_theme_stylebox_override("panel", sb)
+
+    var inner := VBoxContainer.new()
+    inner.add_theme_constant_override("separation", 4)
+    card.add_child(inner)
+
+    var top := HBoxContainer.new()
+    top.add_theme_constant_override("separation", 6)
+    inner.add_child(top)
+
+    ## Live sprite — uses the same procedural sprite that renders on the
+    ## board, so picker cards are visually authoritative.
+    var sprite := TextureRect.new()
+    sprite.texture = SpriteFactory.piece_texture(def.id, 0)
+    sprite.custom_minimum_size = Vector2(56, 56)
+    sprite.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+    sprite.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+    sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+    top.add_child(sprite)
+
+    var name_box := VBoxContainer.new()
+    name_box.add_theme_constant_override("separation", 2)
+    top.add_child(name_box)
+
+    var name_lbl := Label.new()
+    name_lbl.text = def.display_name
+    name_lbl.add_theme_font_size_override("font_size", 14)
+    name_lbl.modulate = Color(0.95, 0.88, 0.74)
+    name_box.add_child(name_lbl)
+
+    var stats := Label.new()
+    stats.text = "%dHP / %dDMG" % [def.hp, def.damage]
+    stats.add_theme_font_size_override("font_size", 12)
+    stats.modulate = Color(1, 1, 1, 0.75)
+    name_box.add_child(stats)
+
+    var desc := Label.new()
+    desc.text = _describe_variant(def)
+    desc.add_theme_font_size_override("font_size", 11)
+    desc.modulate = Color(1, 1, 1, 0.65)
+    desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    desc.custom_minimum_size = Vector2(160, 0)
+    inner.add_child(desc)
+
+    ## Click target — covers the whole card.
+    var hit := Button.new()
+    hit.flat = true
+    hit.focus_mode = Control.FOCUS_NONE
+    hit.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+    hit.pressed.connect(_on_variant_picked.bind(slot, def.id))
+    card.add_child(hit)
+
+    return card
+
+func _on_variant_picked(slot: String, variant_id: String) -> void:
+    working.variant_selection[slot] = variant_id
+    _populate_content()
 
 # ============================================================================
-# FIELD HANDLERS — explicit methods, no lambdas
+# Ability editor
 # ============================================================================
 
-func _on_name_changed(v: String) -> void:
-    _def.display_name = v
-    _populate_piece_list()
-
-func _on_glyph_changed(v: String) -> void:
-    if v.length() >= 1:
-        _def.glyph = v.substr(0, 2)
-        _populate_piece_list()
-
-func _on_hp_changed(v: int) -> void:     _def.hp = v
-func _on_damage_changed(v: int) -> void: _def.damage = v
-
-func _on_toggle_changed(value: bool, key: String) -> void:
-    _toggles[key] = value
-    _def.move_patterns = _toggles_to_patterns(_toggles)
-    _render_editor()
-
-func _on_range_changed(v: int) -> void:
-    _toggles["range"] = v
-    _def.move_patterns = _toggles_to_patterns(_toggles)
-
-func _on_onhit_kind_changed(v: int) -> void:
-    _def.on_hit.kind = v
-    _render_editor()
-
-func _on_onhit_dpt_changed(v: int) -> void:      _def.on_hit.damage_per_turn = v
-func _on_onhit_duration_changed(v: int) -> void: _def.on_hit.duration = v
-
-## ===========================================================================
-## ABILITY EDITOR — its own page in the master/detail. Each ability is shown
-## independently (Cannon and Lightning are separate selectable entries in the
-## piece list). One ability is "active" per game; the other's settings are
-## still kept around so toggling back doesn't lose customization.
-## ===========================================================================
-
-func _render_ability_editor(which: String) -> void:
-    var kind: int
-    var heading: String
-    var description: String
+func _build_ability_section(kind: int) -> Control:
     var spec: SpecialAbilityDef
-    if which == "cannon":
-        kind = SpecialAbilityDef.Kind.CANNON
-        heading = "◎  Cannon"
-        description = "Plus-shape AOE attack queued one turn ahead. " \
-                    + "Cannot target squares the enemy started on."
+    var heading_text: String
+    var description: String
+    if kind == SpecialAbilityDef.Kind.CANNON:
         if working.cannon == null:
             working.cannon = Defaults.make_special(SpecialAbilityDef.Kind.CANNON, 2, 4, 1, 0)
         spec = working.cannon
+        heading_text = "◎  Cannon"
+        description = "Plus-shape AOE attack queued one turn ahead. " \
+                    + "Cannot target squares the enemy started on."
     else:
-        kind = SpecialAbilityDef.Kind.LIGHTNING
-        heading = "⚡  Lightning"
-        description = "Instant single-target damage. Cannot target the royal piece."
         if working.lightning == null:
             working.lightning = Defaults.make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
         spec = working.lightning
+        heading_text = "⚡  Lightning"
+        description = "Instant single-target damage. Cannot target the royal piece."
 
-    var title := Label.new()
-    title.text = heading
-    title.add_theme_font_size_override("font_size", 22)
-    editor_pane.add_child(title)
+    var sec := VBoxContainer.new()
+    sec.add_theme_constant_override("separation", 4)
+
+    var head_row := HBoxContainer.new()
+    head_row.add_theme_constant_override("separation", 8)
+    sec.add_child(head_row)
+
+    var heading := Label.new()
+    heading.text = heading_text
+    heading.add_theme_font_size_override("font_size", 15)
+    heading.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+    head_row.add_child(heading)
+
+    var active_cb := CheckBox.new()
+    active_cb.text = "Active"
+    active_cb.button_pressed = (working.enabled_ability == kind)
+    active_cb.toggled.connect(_on_active_ability_toggled.bind(kind))
+    head_row.add_child(active_cb)
 
     var blurb := Label.new()
     blurb.text = description
     blurb.modulate = Color(1, 1, 1, 0.65)
     blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-    editor_pane.add_child(blurb)
+    sec.add_child(blurb)
 
-    ## Active toggle. Only one ability can be active per game; toggling this
-    ## one ON disables the other.
-    var active_box := HBoxContainer.new()
-    active_box.add_theme_constant_override("separation", 8)
-    var cb := CheckBox.new()
-    cb.button_pressed = (working.enabled_ability == kind)
-    cb.text = "Use this ability in the current game"
-    cb.toggled.connect(_on_active_ability_toggled.bind(kind))
-    active_box.add_child(cb)
-    editor_pane.add_child(active_box)
+    sec.add_child(_int_row("Damage",          spec.damage,         1, 5,  spec, "damage"))
+    sec.add_child(_int_row("Cooldown turns",  spec.cooldown_turns, 1, 10, spec, "cooldown_turns"))
+    sec.add_child(_int_row("Energy cost",     spec.energy_cost,    0, 10, spec, "energy_cost"))
+    sec.add_child(_int_row("Max charges",     spec.max_charges,    1, 5,  spec, "max_charges"))
+    sec.add_child(_int_row("Initial charges", spec.initial_charges, 0, max(spec.max_charges, 0),
+                            spec, "initial_charges"))
+    return sec
 
-    var sep := HSeparator.new()
-    editor_pane.add_child(sep)
+func _int_row(label: String, value: int, min_v: int, max_v: int,
+              spec: SpecialAbilityDef, field: String) -> HBoxContainer:
+    var h := HBoxContainer.new()
+    h.add_theme_constant_override("separation", 8)
+    var l := Label.new()
+    l.text = label
+    l.custom_minimum_size = Vector2(180, 0)
+    h.add_child(l)
+    var sb := SpinBox.new()
+    sb.min_value = min_v
+    sb.max_value = max_v
+    sb.value = value
+    sb.step = 1
+    sb.value_changed.connect(_ability_setter.bind(spec, field))
+    h.add_child(sb)
+    return h
 
-    var stats := _section("Parameters")
-    stats.add_child(_int_field("Damage",
-        spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
-    stats.add_child(_int_field("Cooldown (turns)",
-        spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
-    stats.add_child(_int_field("Energy cost",
-        spec.energy_cost,    0, 10, _ability_setter.bind(spec, "energy_cost")))
-    stats.add_child(_int_field("Max charges",
-        spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
-    stats.add_child(_int_field("Initial charges",
-        spec.initial_charges, 0, max(spec.max_charges, 0),
-        _ability_setter.bind(spec, "initial_charges")))
-    editor_pane.add_child(stats)
-
-    ## Footer reset button works for either pieces or abilities.
-    var footer := HBoxContainer.new()
-    footer.add_theme_constant_override("separation", 8)
-    var btn_reset := Button.new()
-    btn_reset.text = "Reset this ability to default"
-    btn_reset.pressed.connect(_on_reset_this)
-    footer.add_child(btn_reset)
-    editor_pane.add_child(footer)
+## Generic int-setter. SpinBox emits floats; cast to int and clamp the
+## related initial_charges field if max_charges drops.
+func _ability_setter(value: float, spec: SpecialAbilityDef, field: String) -> void:
+    spec.set(field, int(value))
+    if field == "max_charges" and spec.initial_charges > int(value):
+        spec.initial_charges = int(value)
+        _populate_content()
 
 func _on_active_ability_toggled(pressed: bool, kind: int) -> void:
     if pressed:
         working.enabled_ability = kind
     elif working.enabled_ability == kind:
-        ## Allow turning the active one off — falls back to NONE.
+        ## Toggling the active one off → no ability for this game.
         working.enabled_ability = SpecialAbilityDef.Kind.NONE
-    _populate_piece_list()
-    _render_editor()
+    _populate_content()
 
-## Generic int-setter. Bound args (spec, field_name) come AFTER the new value
-## per Callable.bind semantics — Godot 4 appends bound args after call args.
-func _ability_setter(value: int, spec: SpecialAbilityDef, field: String) -> void:
-    spec.set(field, value)
-    if field == "max_charges" and spec.initial_charges > value:
-        spec.initial_charges = value
-        _render_editor()
-
-func _on_reset_this() -> void:
-    var fresh := Defaults.make_default_config()
-    if current_id.begins_with("piece:"):
-        var piece_id := current_id.substr(6)
-        if fresh.pieces.has(piece_id):
-            working.pieces[piece_id] = fresh.pieces[piece_id]
-    elif current_id == "ability:cannon":
-        working.cannon = _clone_special(fresh.cannon)
-    elif current_id == "ability:lightning":
-        working.lightning = _clone_special(fresh.lightning)
-    _populate_piece_list()
-    _render_editor()
-
-func _on_reset_all() -> void:
-    working = Defaults.make_default_config()
-    if working.pieces.size() > 0:
-        current_id = "piece:" + working.pieces.keys()[0]
-    _populate_piece_list()
-    _render_editor()
+# ============================================================================
+# Save / Cancel / Reset
+# ============================================================================
 
 func _on_save() -> void:
+    working.rebuild_initial_setup()
     GameSettings.active_config = working
     GameSettings.save()
     back_to_menu.emit()
@@ -354,218 +284,39 @@ func _on_save() -> void:
 func _on_cancel() -> void:
     back_to_menu.emit()
 
-# ============================================================================
-# FORM HELPERS
-# ============================================================================
-
-func _section(title: String) -> VBoxContainer:
-    var v := VBoxContainer.new()
-    v.add_theme_constant_override("separation", 4)
-    var h := Label.new()
-    h.text = title
-    h.add_theme_font_size_override("font_size", 14)
-    h.modulate = Color(0.8, 0.85, 0.95)
-    v.add_child(h)
-    return v
-
-func _row(label: String) -> HBoxContainer:
-    var h := HBoxContainer.new()
-    h.add_theme_constant_override("separation", 8)
-    var l := Label.new()
-    l.text = label
-    l.custom_minimum_size = Vector2(180, 0)
-    h.add_child(l)
-    return h
-
-func _text_field(label: String, value: String, on_change: Callable) -> HBoxContainer:
-    var h := _row(label)
-    var le := LineEdit.new()
-    le.text = value
-    le.custom_minimum_size = Vector2(180, 0)
-    le.text_changed.connect(on_change)
-    h.add_child(le)
-    return h
-
-func _int_field(label: String, value: int, min_v: int, max_v: int,
-                on_change: Callable) -> HBoxContainer:
-    var h := _row(label)
-    var sb := SpinBox.new()
-    sb.min_value = min_v
-    sb.max_value = max_v
-    sb.value = value
-    sb.step = 1
-    sb.value_changed.connect(_spinbox_to_int.bind(on_change))
-    h.add_child(sb)
-    return h
-
-func _spinbox_to_int(value: float, sink: Callable) -> void:
-    sink.call(int(value))
-
-func _check_field(label: String, value: bool, on_change: Callable) -> HBoxContainer:
-    var h := HBoxContainer.new()
-    h.add_theme_constant_override("separation", 8)
-    var cb := CheckBox.new()
-    cb.button_pressed = value
-    cb.text = label
-    cb.toggled.connect(on_change)
-    h.add_child(cb)
-    return h
-
-func _select_field(label: String, value: int, options: Array,
-                   on_change: Callable) -> HBoxContainer:
-    var h := _row(label)
-    var ob := OptionButton.new()
-    var idx := 0
-    for o in options:
-        ob.add_item(String(o[0]))
-        ob.set_item_metadata(idx, int(o[1]))
-        if int(o[1]) == value: ob.select(idx)
-        idx += 1
-    ob.item_selected.connect(_select_dispatch.bind(ob, on_change))
-    h.add_child(ob)
-    return h
-
-func _select_dispatch(idx: int, ob: OptionButton, sink: Callable) -> void:
-    sink.call(int(ob.get_item_metadata(idx)))
+func _on_reset_all() -> void:
+    working = Defaults.make_default_config()
+    _populate_content()
 
 # ============================================================================
-# REACHABILITY PREVIEW
+# Variant copy / display helpers
 # ============================================================================
 
-func _build_reach_grid(def: PieceDef) -> GridContainer:
-    var grid := GridContainer.new()
-    grid.columns = 8
-    grid.add_theme_constant_override("h_separation", 0)
-    grid.add_theme_constant_override("v_separation", 0)
+func _slot_display_name(slot: String) -> String:
+    match slot:
+        "pawn":   return "Pawn"
+        "bishop": return "Bishop"
+        "knight": return "Knight"
+        "rook":   return "Rook"
+        "queen":  return "Queen"
+        "king":   return "King"
+    return slot.capitalize()
 
-    var center := 3 * 8 + 3
-    var reach_a := _preview_reach(def, center, false)
-    var reach_b := _preview_reach(def, center, true)
-
-    ## Distinct colors — green for "this piece can MOVE here" (empty target),
-    ## red for "this piece can CAPTURE here" (an enemy is hypothetically
-    ## standing on it), yellow for the piece itself. Doesn't reuse the
-    ## dark/light tile color so the highlight reads at a glance.
-    for r in range(7, -1, -1):
-        for f in 8:
-            var sq := r * 8 + f
-            var cell := ColorRect.new()
-            cell.custom_minimum_size = Vector2(28, 28)
-            var is_dark := (f + r) % 2 == 0
-            cell.color = Color("#95684a") if is_dark else Color("#d8c5a4")
-            if sq == center:
-                cell.color = Color(0.96, 0.83, 0.4)
-            elif reach_a.has(sq):
-                cell.color = Color(0.42, 0.78, 0.5)   ## green — movable empty
-            elif reach_b.has(sq):
-                cell.color = Color(0.86, 0.42, 0.42) ## red   — capturable
-            grid.add_child(cell)
-    return grid
-
-func _preview_reach(def: PieceDef, from_sq: int, place_enemies: bool) -> Dictionary:
-    var cfg := GameConfig.new()
-    cfg.pieces = { def.id: def }
-    if place_enemies:
-        var dummy := PieceDef.new()
-        dummy.id = "__dummy"
-        dummy.display_name = "dummy"
-        dummy.glyph = "?"
-        dummy.hp = 99
-        dummy.damage = 1
-        ## (move_patterns defaults to an empty Array[MovePattern] — no need
-        ## to reassign; an untyped `= []` would fail strict-mode type-check.)
-        dummy.on_hit = StatusEffectDef.new()
-        cfg.pieces["__dummy"] = dummy
-    var board: Array = []; board.resize(64)
-    for i in 64: board[i] = null
-    board[from_sq] = Rules.make_piece(def.id, Rules.WHITE, def)
-    if place_enemies:
-        for i in 64:
-            if i == from_sq: continue
-            board[i] = Rules.make_piece("__dummy", Rules.BLACK, cfg.pieces["__dummy"])
-    var s := GameState.new()
-    s.config = cfg
-    s.board = board
-    s.side = Rules.WHITE
-    var set_d: Dictionary = {}
-    for m in Rules.pseudo_legal_moves(s, Rules.WHITE):
-        if int(m["from"]) == from_sq:
-            set_d[int(m["to"])] = true
-    return set_d
-
-# ============================================================================
-# TOGGLE ↔ PATTERN MAPPING
-# ============================================================================
-
-func _infer_toggles(def: PieceDef) -> Dictionary:
-    var t: Dictionary = {
-        "ortho": false, "diag": false, "range": 0,
-        "knight": false, "king": false, "pawn": false,
-    }
-    for pat in def.move_patterns:
-        if pat.kind == MovePattern.Kind.RIDER:
-            if _offsets_match(pat.offsets, Defaults.ORTHO):
-                t["ortho"] = true
-                t["range"] = pat.max_range
-            elif _offsets_match(pat.offsets, Defaults.DIAG):
-                t["diag"] = true
-                t["range"] = pat.max_range
-        elif pat.kind == MovePattern.Kind.LEAPER:
-            if _offsets_match(pat.offsets, Defaults.KNIGHT_OFFS):
-                t["knight"] = true
-            elif _offsets_match(pat.offsets, Defaults.KING_OFFS):
-                t["king"] = true
-        elif pat.kind == MovePattern.Kind.PAWN_PUSH \
-             or pat.kind == MovePattern.Kind.PAWN_DOUBLE \
-             or pat.kind == MovePattern.Kind.PAWN_CAPTURE:
-            t["pawn"] = true
-    return t
-
-func _toggles_to_patterns(t: Dictionary) -> Array[MovePattern]:
-    var out: Array[MovePattern] = []
-    if t["ortho"]:
-        var p := MovePattern.new()
-        p.kind = MovePattern.Kind.RIDER
-        p.offsets = _to_v2i(Defaults.ORTHO)
-        p.max_range = int(t["range"])
-        out.append(p)
-    if t["diag"]:
-        var p := MovePattern.new()
-        p.kind = MovePattern.Kind.RIDER
-        p.offsets = _to_v2i(Defaults.DIAG)
-        p.max_range = int(t["range"])
-        out.append(p)
-    if t["knight"]:
-        var p := MovePattern.new()
-        p.kind = MovePattern.Kind.LEAPER
-        p.offsets = _to_v2i(Defaults.KNIGHT_OFFS)
-        out.append(p)
-    if t["king"]:
-        var p := MovePattern.new()
-        p.kind = MovePattern.Kind.LEAPER
-        p.offsets = _to_v2i(Defaults.KING_OFFS)
-        out.append(p)
-    if t["pawn"]:
-        var p1 := MovePattern.new(); p1.kind = MovePattern.Kind.PAWN_PUSH;    out.append(p1)
-        var p2 := MovePattern.new(); p2.kind = MovePattern.Kind.PAWN_DOUBLE;  out.append(p2)
-        var p3 := MovePattern.new(); p3.kind = MovePattern.Kind.PAWN_CAPTURE; out.append(p3)
-    return out
-
-func _to_v2i(arr: Array) -> Array[Vector2i]:
-    var out: Array[Vector2i] = []
-    for v in arr: out.append(v)
-    return out
-
-func _offsets_match(a: Array, b: Array) -> bool:
-    if a.size() != b.size(): return false
-    var sa: Array = []
-    var sb: Array = []
-    for v in a: sa.append("%d,%d" % [v.x, v.y])
-    for v in b: sb.append("%d,%d" % [v.x, v.y])
-    sa.sort(); sb.sort()
-    for i in sa.size():
-        if sa[i] != sb[i]: return false
-    return true
+## One-line copy describing what the variant does. Hand-authored per id so
+## it can mention the gameplay differentiator instead of summarizing
+## auto-generated move-pattern records.
+func _describe_variant(def: PieceDef) -> String:
+    match def.id:
+        "pawn":            return "Push, double-push, diagonal capture, promotes."
+        "bandit_pawn":     return "Cross-step move, X-pounce attack. No promote."
+        "bishop":          return "Slides any number of diagonals."
+        "assassin_bishop": return "Jumps up to 2 diagonals; ignores blockers."
+        "knight":          return "L-shape leap. On hit: freeze (1 turn)."
+        "alter_knight":    return "Knight move (jump), king-shape attack. Freeze on hit."
+        "rook":            return "Slides orthogonally. On hit: burn (2 turns)."
+        "queen":           return "Slides any number of squares any direction."
+        "king":            return "Royal piece. One step, any direction."
+    return ""
 
 # ============================================================================
 # DEEP CLONE — the working copy is a full clone so Cancel really discards.
@@ -581,6 +332,10 @@ func _clone_config(src: GameConfig) -> GameConfig:
     if src.cannon != null:    dst.cannon    = _clone_special(src.cannon)
     if src.lightning != null: dst.lightning = _clone_special(src.lightning)
     dst.enabled_ability = src.enabled_ability
+    dst.stage = src.stage
+    dst.debris_spawn_chance = src.debris_spawn_chance
+    dst.debris_damage = src.debris_damage
+    dst.variant_selection = src.variant_selection.duplicate(true)
     return dst
 
 func _clone_special(s: SpecialAbilityDef) -> SpecialAbilityDef:

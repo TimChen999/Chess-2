@@ -74,11 +74,85 @@ const T_ANTICIPATE := 0.07
 const T_LUNGE      := 0.15
 const T_SETTLE     := 0.07
 const T_IMPACT     := 0.20
+## Knight / alter-knight jump arc — vertical lift in pixels over the move's
+## linear interpolation. Layered on top of the move_jump pose animation.
+const KNIGHT_ARC_HEIGHT := 24.0
 var _animating: bool = false
+
+# ---------- ambient UI motion (PIECE-VARIANTS.md §4.7) ----------
+## A single phase value drives every "is something happening?" pulse on the
+## board / HUD so they stay phase-coherent. _process advances it, _render
+## recomputes membership of each pulse-list, and _update_pulse_modulates
+## applies modulates each tick. Using a single shared phase (vs. per-node
+## looping Tweens) sidesteps the "tween restarts on every _render" footgun.
+const PULSE_PERIOD_MOVE      := 1.0   ## move-overlay alpha
+const PULSE_PERIOD_SELECTED  := 0.6   ## selected-piece scale
+const PULSE_PERIOD_TELEGRAPH := 1.5   ## cannon plus / debris warning
+const PULSE_PERIOD_READY     := 1.5   ## ability HUD ready indicator
+var _pulse_phase: float = 0.0
+var _pulsing_move_overlays: Array = []     ## ColorRect on legal-target squares
+var _pulsing_telegraphs: Array = []        ## ColorRect on cannon/debris warnings
+var _pulsing_target_previews: Array = []   ## ColorRect on ability target previews
+var _pulsing_selected_sprite: TextureRect = null
+var _pulsing_ability_icons: Array = []     ## TextureRect on ready ability cards
 
 func _ready() -> void:
     _build_ui()
     _new_game()
+
+func _process(delta: float) -> void:
+    _pulse_phase += delta
+    _update_pulse_modulates()
+
+## Apply the current pulse phase to every node tracked in the _pulsing_*
+## arrays. _render is responsible for membership; this function only scales
+## the visuals, and is cheap enough to run every frame.
+func _update_pulse_modulates() -> void:
+    var t_move := sin(_pulse_phase * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
+    var a_move := lerpf(0.65, 1.0, t_move)
+    for n in _pulsing_move_overlays:
+        if is_instance_valid(n): n.modulate.a = a_move
+
+    var t_tg := sin(_pulse_phase * TAU / PULSE_PERIOD_TELEGRAPH) * 0.5 + 0.5
+    var a_tg := lerpf(0.55, 1.0, t_tg)
+    for n in _pulsing_telegraphs:
+        if is_instance_valid(n): n.modulate.a = a_tg
+
+    var t_tp := sin((_pulse_phase + 0.25) * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
+    var a_tp := lerpf(0.55, 1.0, t_tp)
+    for n in _pulsing_target_previews:
+        if is_instance_valid(n): n.modulate.a = a_tp
+
+    if is_instance_valid(_pulsing_selected_sprite):
+        var t_sel := sin(_pulse_phase * TAU / PULSE_PERIOD_SELECTED) * 0.5 + 0.5
+        var s := lerpf(1.00, 1.06, t_sel)
+        _pulsing_selected_sprite.scale = Vector2(s, s)
+
+    var t_rd := sin(_pulse_phase * TAU / PULSE_PERIOD_READY) * 0.5 + 0.5
+    var ready_color := Color(1.0, lerpf(0.92, 1.10, t_rd),
+                             lerpf(0.85, 1.00, t_rd), 1.0)
+    for n in _pulsing_ability_icons:
+        if is_instance_valid(n): n.modulate = ready_color
+
+func _clear_pulse_lists() -> void:
+    ## Clear membership; _process will simply find empty arrays next tick.
+    ## Also restore any nodes that were having modulate/scale driven by
+    ## pulses, so a no-pulse render returns them to their static defaults.
+    for n in _pulsing_move_overlays:
+        if is_instance_valid(n): n.modulate.a = 1.0
+    for n in _pulsing_telegraphs:
+        if is_instance_valid(n): n.modulate.a = 1.0
+    for n in _pulsing_target_previews:
+        if is_instance_valid(n): n.modulate.a = 1.0
+    for n in _pulsing_ability_icons:
+        if is_instance_valid(n): n.modulate = Color.WHITE
+    if is_instance_valid(_pulsing_selected_sprite):
+        _pulsing_selected_sprite.scale = Vector2.ONE
+    _pulsing_move_overlays.clear()
+    _pulsing_telegraphs.clear()
+    _pulsing_target_previews.clear()
+    _pulsing_ability_icons.clear()
+    _pulsing_selected_sprite = null
 
 func _new_game() -> void:
     state = Rules.new_game(GameSettings.active_config)
@@ -422,6 +496,7 @@ func _make_square(sq: int) -> Button:
 # ============================================================================
 
 func _render() -> void:
+    _clear_pulse_lists()
     var cannon_targets := {}
     for pa in state.pending_attacks:
         if pa.kind != SpecialAbilityDef.Kind.CANNON: continue
@@ -474,11 +549,14 @@ func _render() -> void:
 
         # Layered overlays (later overrides earlier). All overlays are
         # translucent so the tile + piece beneath stays visible.
+        var hl_pulse_kind := ""
         if debris_pairs_remaining.has(sq):
             var pairs: int = int(debris_pairs_remaining[sq])
             hl.color = DEBRIS_WARN_NEAR if pairs <= 1 else DEBRIS_WARN_FAR
+            hl_pulse_kind = "telegraph"
         if cannon_targets.has(sq):
             hl.color = CANNON_PENDING_TINT
+            hl_pulse_kind = "telegraph"
         if (last_status.get("kind", "") == "check" or last_status.get("kind", "") == "checkmate") \
            and int(last_status.get("royal_sq", -1)) == sq:
             bg.modulate = Color(1.4, 0.7, 0.7)
@@ -486,9 +564,11 @@ func _render() -> void:
             for m in legal_for_selected:
                 if int(m["to"]) == sq:
                     hl.color = MOVE_CAPTURE_TINT if m.get("capture", false) else MOVE_EMPTY_TINT
+                    hl_pulse_kind = "move"
                     break
         if selected == sq and mode == "select_move":
             hl.color = SELECTED_TINT
+            hl_pulse_kind = ""   ## selected square owns the scale-pulse below
         ## Ability targeting — paint the faint "selectable" wash first, then
         ## let the hover impact and bullseye colors override it on top so
         ## the impact area pops above the surrounding region.
@@ -497,9 +577,11 @@ func _render() -> void:
                 if int(t["sq"]) == sq:
                     var k = ability_ctx.get("kind")
                     hl.color = ABILITY_CANNON_TINT if k == SpecialAbilityDef.Kind.CANNON else ABILITY_LIGHT_TINT
+                    hl_pulse_kind = "target"
                     break
         if hover_plus.has(sq):
             hl.color = CANNON_HOVER_TINT
+            hl_pulse_kind = "target"
         if mode == "select_ability" and sq == hover_target_sq and hover_plus.has(sq) \
            and int(ability_ctx.get("kind", -1)) == SpecialAbilityDef.Kind.CANNON:
             ## Bullseye on the actual click target — only meaningful for the
@@ -507,16 +589,26 @@ func _render() -> void:
             ## plus arms. hover_plus.has(sq) gates this to valid targets only
             ## (hovering off-target leaves hover_plus empty).
             hl.color = CANNON_CENTER_TINT
+            hl_pulse_kind = "target"
+
+        match hl_pulse_kind:
+            "move": _pulsing_move_overlays.append(hl)
+            "telegraph": _pulsing_telegraphs.append(hl)
+            "target": _pulsing_target_previews.append(hl)
 
         var p = state.board[sq]
         if p != null:
             var def: PieceDef = state.config.pieces[p.def_id]
             sprite.texture = SpriteFactory.piece_texture(p.def_id, p.color)
+            sprite.scale = Vector2.ONE
+            sprite.pivot_offset = sprite.size * 0.5
             shadow.visible = true
             if Rules.is_frozen(p):
                 sprite.modulate = Color(0.7, 0.85, 1.2)
             else:
                 sprite.modulate = Color.WHITE
+            if selected == sq and mode == "select_move":
+                _pulsing_selected_sprite = sprite
             hp_plate.visible = true
             hp_lbl.text = "%d/%d" % [p.hp, def.hp]
             hp_lbl.add_theme_color_override("font_color",
@@ -725,6 +817,8 @@ func _make_ability_card(kind: int, color: int) -> Control:
                      and charges > 0 \
                      and not state.special_used_this_turn
     if clickable:
+        ## Ready icons get the breathing-color pulse (PIECE-VARIANTS.md §4.7).
+        _pulsing_ability_icons.append(icon)
         var hit := Button.new()
         hit.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
         hit.flat = true
@@ -906,6 +1000,75 @@ func _create_floating_piece(piece: Piece, sq: int) -> TextureRect:
     anim_overlay.add_child(tr)
     return tr
 
+## Sprite-based FX sized to a single square. Used by ability resolves
+## (cannon / debris / lightning). The first frame is set on creation so
+## there's no transparent flicker before the first scheduled swap fires.
+func _create_fx_sprite(sq: int, frames: Array, tint: Color = Color.WHITE) -> TextureRect:
+    var tr := TextureRect.new()
+    if not frames.is_empty(): tr.texture = frames[0]
+    tr.size = Vector2(SQ_SIZE, SQ_SIZE)
+    tr.position = _sq_to_pos(sq)
+    tr.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+    tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+    tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+    tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+    tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    tr.modulate = tint
+    anim_overlay.add_child(tr)
+    return tr
+
+## Schedule a one-shot piece animation by swapping `lbl.texture` through the
+## frame array for `anim` over `total_dur` seconds, starting at `delay`.
+## No-op if the piece's frames dict doesn't have the requested anim — keeps
+## variant-specific anims (jump, lunge) from blowing up when they're missing
+## on a stock piece.
+func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
+                          color: int, anim: String, total_dur: float,
+                          delay: float) -> void:
+    var dict: Dictionary = SpriteFactory.piece_frames(def_id, color)
+    if not dict.has(anim): return
+    UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
+
+## Knight / Alter Knight parabolic arc — driven by tween_method so the
+## position computation is per-tick and overrides the linear lerp the
+## position tween would otherwise produce. KNIGHT_ARC_HEIGHT controls the
+## peak height; the parabola peaks at t = 0.5.
+func _set_knight_arc_pos(t: float, lbl: TextureRect,
+                          from_pos: Vector2, to_pos: Vector2) -> void:
+    if not is_instance_valid(lbl): return
+    var pos := from_pos.lerp(to_pos, t)
+    pos.y -= KNIGHT_ARC_HEIGHT * 4.0 * t * (1.0 - t)
+    lbl.position = pos
+
+## AOE resolve helper — kicks off a sprite-based one-shot at every square in
+## `squares`, with a small per-square ripple delay so the effect reads as
+## radiating outward instead of all popping at once.
+func _play_aoe_resolve(tween: Tween, squares: Array, kind: String, floats: Array) -> void:
+    var frames: Array = SpriteFactory.aoe_resolve_frames(kind)
+    if frames.is_empty(): return
+    var per_frame := 0.06 if kind == "cannon" else 0.05
+    var total := per_frame * float(frames.size())
+    for i in squares.size():
+        var sq: int = int(squares[i])
+        var ripple: float = float(i) * 0.04
+        var fx := _create_fx_sprite(sq, frames)
+        floats.append(fx)
+        UiMotion.schedule_frame_swaps(tween, fx, frames, total, ripple)
+        ## Fade out after the last frame so the sprite doesn't linger.
+        tween.tween_property(fx, "modulate:a", 0.0, 0.10).set_delay(ripple + total - 0.05)
+
+## Lightning resolve helper — single-target, no ripple. Plays the
+## prebuilt strike spritesheet and fades out.
+func _play_lightning_at(tween: Tween, sq: int, floats: Array) -> void:
+    var frames: Array = SpriteFactory.lightning_strike_frames()
+    if frames.is_empty(): return
+    var per_frame := 0.07
+    var total := per_frame * float(frames.size())
+    var fx := _create_fx_sprite(sq, frames)
+    floats.append(fx)
+    UiMotion.schedule_frame_swaps(tween, fx, frames, total, 0.0)
+    tween.tween_property(fx, "modulate:a", 0.0, 0.12).set_delay(total - 0.06)
+
 func _create_fx_label(glyph: String, sq: int, tint: Color) -> Label:
     var lbl := Label.new()
     lbl.text = glyph
@@ -981,6 +1144,10 @@ func _animate_events(old_state: GameState, events: Array) -> void:
             var from_pos := _sq_to_pos(from_sq) + Vector2(4, 4)
             var to_pos := _sq_to_pos(to_sq) + Vector2(4, 4)
             var is_attack := (k == "move") and (old_state.board[to_sq] != null)
+            var mover = old_state.board[from_sq]
+            var def_id: String = mover.def_id if mover != null else ""
+            var color: int = mover.color if mover != null else 0
+            var jumps := def_id == "knight" or def_id == "alter_knight"
 
             if is_attack:
                 ## ANTICIPATE — small pull-back, opposite of the attack vector.
@@ -1000,6 +1167,12 @@ func _animate_events(old_state: GameState, events: Array) -> void:
                     .set_delay(T_ANTICIPATE + T_LUNGE) \
                     .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
+                ## Pose frames — alter knight uses the deliberate spear-thrust
+                ## "lunge" pose set; everyone else uses the snappy "attack" jab.
+                var attack_anim := "attack_lunge" if def_id == "alter_knight" else "attack"
+                _schedule_piece_anim(tween, lbl, def_id, color, attack_anim,
+                    T_ANTICIPATE + T_LUNGE + T_SETTLE, 0.0)
+
                 ## IMPACT BURST — sprite at target square; spawn pre-hidden,
                 ## scale up + spin + fade in/out. Pure Tween, no particles.
                 var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
@@ -1018,22 +1191,33 @@ func _animate_events(old_state: GameState, events: Array) -> void:
                 ## brief delay so it visually starts at impact moment).
                 var delay := T_IMPACT if (k == "push" and has_attack) else 0.0
                 var dur := ANIM_MOVE_DURATION
-                tween.tween_property(lbl, "position", to_pos, dur) \
-                    .set_delay(delay) \
-                    .set_trans(Tween.TRANS_BACK if k == "push" else Tween.TRANS_QUAD) \
-                    .set_ease(Tween.EASE_OUT)
+                if k == "move" and jumps:
+                    ## Knight / alter knight non-capture move — parabolic arc
+                    ## layered on top of the move_jump pose animation.
+                    tween.tween_method(_set_knight_arc_pos.bind(lbl, from_pos, to_pos),
+                        0.0, 1.0, dur) \
+                        .set_delay(delay) \
+                        .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+                    _schedule_piece_anim(tween, lbl, def_id, color, "move_jump", dur, delay)
+                else:
+                    tween.tween_property(lbl, "position", to_pos, dur) \
+                        .set_delay(delay) \
+                        .set_trans(Tween.TRANS_BACK if k == "push" else Tween.TRANS_QUAD) \
+                        .set_ease(Tween.EASE_OUT)
+                    if k == "move":
+                        _schedule_piece_anim(tween, lbl, def_id, color, "move", dur, delay)
             any = true
 
         elif k == "damage":
             var sq := int(ev["sq"])
             var target_lbl: TextureRect = floats_by_sq.get(sq, null)
+            var victim = old_state.board[sq]
             if target_lbl == null:
                 ## Damaged piece isn't being moved — give it a floating clone
                 ## so we can flash and shake without touching the static cell.
-                var p = old_state.board[sq]
-                if p == null: continue
+                if victim == null: continue
                 hidden.append(_hide_static_sprite(sq))
-                target_lbl = _create_floating_piece(p, sq)
+                target_lbl = _create_floating_piece(victim, sq)
                 floats.append(target_lbl)
             var delay: float = T_IMPACT if has_attack else 0.0
             ## WHITEOUT then RED then back. The whiteout cue is the impact.
@@ -1043,6 +1227,11 @@ func _animate_events(old_state: GameState, events: Array) -> void:
                 .set_delay(delay + 0.04)
             tween.tween_property(target_lbl, "modulate", Color.WHITE, 0.10) \
                 .set_delay(delay + 0.10)
+            ## "hit" pose shake — small body offset cycle layered under the
+            ## color flash above.
+            if victim != null:
+                _schedule_piece_anim(tween, target_lbl, victim.def_id, victim.color,
+                    "hit", 0.18, delay)
             any = true
 
         elif k == "kill":
@@ -1054,65 +1243,26 @@ func _animate_events(old_state: GameState, events: Array) -> void:
                     ANIM_KILL_DURATION).set_delay(delay)
                 tween.tween_property(lbl, "modulate:a", 0.0,
                     ANIM_KILL_DURATION).set_delay(delay)
+                var victim = old_state.board[sq]
+                if victim != null:
+                    _schedule_piece_anim(tween, lbl, victim.def_id, victim.color,
+                        "death", ANIM_KILL_DURATION, delay)
                 any = true
 
         elif k == "lightning":
-            var sq := int(ev["target"])
-            ## Two-pass burst: a bright ring + the bolt glyph. Together they
-            ## sell the strike better than a single sprite.
-            var ring := _create_fx_label("✺", sq, Color(0.7, 0.85, 1.5))
-            floats.append(ring)
-            ring.scale = Vector2(0.2, 0.2)
-            tween.tween_property(ring, "scale", Vector2(2.4, 2.4), 0.30) \
-                .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-            tween.tween_property(ring, "modulate:a", 0.0, 0.30).set_delay(0.10)
-
-            var bolt := _create_fx_label("⚡", sq, Color(0.95, 1.0, 1.4))
-            floats.append(bolt)
-            bolt.scale = Vector2(0.4, 0.4)
-            tween.tween_property(bolt, "scale", Vector2(1.9, 1.9), 0.18) \
-                .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-            tween.tween_property(bolt, "modulate:a", 0.0, 0.20).set_delay(0.20)
+            _play_lightning_at(tween, int(ev["target"]), floats)
             any = true
 
         elif k == "cannonResolved":
-            for raw in ev.get("target", []):
-                var sq := int(raw)
-                var fx := _create_fx_label("💥", sq, Color(1.0, 0.7, 0.4))
-                floats.append(fx)
-                fx.scale = Vector2(0.3, 0.3)
-                tween.tween_property(fx, "scale", Vector2(1.85, 1.85), 0.30) \
-                    .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-                tween.tween_property(fx, "modulate:a", 0.0, 0.28).set_delay(0.22)
+            var sqs: Array = []
+            for raw in ev.get("target", []): sqs.append(int(raw))
+            _play_aoe_resolve(tween, sqs, "cannon", floats)
             any = true
 
         elif k == "debrisResolved":
-            ## Two-stage burst per impact: a streaking comet that falls in
-            ## from above the square, then an impact crater flash. Both
-            ## halves of the symmetric pair animate in parallel since they
-            ## share the same 'target' event.
-            for raw in ev.get("target", []):
-                var sq := int(raw)
-                var streak := _create_fx_label("☄", sq, Color(1.0, 0.8, 0.5))
-                floats.append(streak)
-                streak.position = _sq_to_pos(sq) + Vector2(0, -SQ_SIZE * 1.2)
-                streak.scale = Vector2(1.4, 1.4)
-                tween.tween_property(streak, "position",
-                    _sq_to_pos(sq), 0.28) \
-                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-                tween.tween_property(streak, "modulate:a", 0.0, 0.10) \
-                    .set_delay(0.24)
-                var crater := _create_fx_label("✸", sq, Color(1.4, 0.6, 0.3))
-                floats.append(crater)
-                crater.scale = Vector2(0.2, 0.2)
-                crater.modulate.a = 0.0
-                tween.tween_property(crater, "modulate:a", 1.0, 0.05) \
-                    .set_delay(0.24)
-                tween.tween_property(crater, "scale", Vector2(2.4, 2.4), 0.32) \
-                    .set_delay(0.24) \
-                    .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-                tween.tween_property(crater, "modulate:a", 0.0, 0.20) \
-                    .set_delay(0.40)
+            var sqs: Array = []
+            for raw in ev.get("target", []): sqs.append(int(raw))
+            _play_aoe_resolve(tween, sqs, "debris", floats)
             any = true
 
         elif k == "debrisQueued":

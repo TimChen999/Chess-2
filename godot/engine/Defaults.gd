@@ -26,6 +26,20 @@ const KNIGHT_OFFS := [
 	Vector2i(-1, -2), Vector2i(-2, -1),
 ]
 
+## Cross / plus shape — alias of ORTHO. Used at the bandit-pawn call site
+## to make the "cross-step" intent obvious.
+const CROSS_OFFS := ORTHO
+
+## X / single-square diagonals — alias of DIAG. Used by bandit-pawn capture.
+const X_OFFS := DIAG
+
+## Assassin Bishop — 1- and 2-square diagonals. LEAPER ignores blockers,
+## which is exactly the "jumps to target instead of sliding" behavior.
+const ASSASSIN_OFFS := [
+	Vector2i( 1,  1), Vector2i( 1, -1), Vector2i(-1,  1), Vector2i(-1, -1),
+	Vector2i( 2,  2), Vector2i( 2, -2), Vector2i(-2,  2), Vector2i(-2, -2),
+]
+
 static func _make_pat(kind: int, offsets: Array = [], max_range: int = 0,
 					  capture_only: bool = false, move_only: bool = false) -> MovePattern:
 	var p := MovePattern.new()
@@ -78,17 +92,21 @@ static func _make_piece(id: String, display_name: String, glyph: String,
 	d.promotes_to = promotes_to
 	return d
 
-static func make_default_config() -> GameConfig:
-	var cfg := GameConfig.new()
-	cfg.pieces = {}
+## ===========================================================================
+## Per-variant factories. Each returns a fresh PieceDef. The factories live
+## here (not on PieceDef itself) so the customization picker can pull them
+## by id from `_make_variants_map()` without a class registry.
+## ===========================================================================
 
-	cfg.pieces["king"] = _make_piece(
+static func _make_regular_king() -> PieceDef:
+	return _make_piece(
 		"king", "King", "♚",
 		3, 1, true, true,
 		[_make_pat(MovePattern.Kind.LEAPER, KING_OFFS)],
 	)
 
-	cfg.pieces["queen"] = _make_piece(
+static func _make_regular_queen() -> PieceDef:
+	return _make_piece(
 		"queen", "Queen", "♛",
 		5, 2, false, false,
 		[
@@ -97,7 +115,8 @@ static func make_default_config() -> GameConfig:
 		],
 	)
 
-	cfg.pieces["rook"] = _make_piece(
+static func _make_regular_rook() -> PieceDef:
+	return _make_piece(
 		"rook", "Rook", "♜",
 		3, 1, false, false,
 		[_make_pat(MovePattern.Kind.RIDER, ORTHO)],
@@ -105,13 +124,15 @@ static func make_default_config() -> GameConfig:
 		_make_effect(StatusEffectDef.Kind.BURN, 1, 2),
 	)
 
-	cfg.pieces["bishop"] = _make_piece(
+static func _make_regular_bishop() -> PieceDef:
+	return _make_piece(
 		"bishop", "Bishop", "♝",
 		2, 1, false, false,
 		[_make_pat(MovePattern.Kind.RIDER, DIAG)],
 	)
 
-	cfg.pieces["knight"] = _make_piece(
+static func _make_regular_knight() -> PieceDef:
+	return _make_piece(
 		"knight", "Knight", "♞",
 		2, 1, false, false,
 		[_make_pat(MovePattern.Kind.LEAPER, KNIGHT_OFFS)],
@@ -119,7 +140,8 @@ static func make_default_config() -> GameConfig:
 		_make_effect(StatusEffectDef.Kind.FREEZE, 0, 1),
 	)
 
-	cfg.pieces["pawn"] = _make_piece(
+static func _make_regular_pawn() -> PieceDef:
+	return _make_piece(
 		"pawn", "Pawn", "♟",
 		1, 1, false, false,
 		[
@@ -131,6 +153,86 @@ static func make_default_config() -> GameConfig:
 		["queen", "rook", "bishop", "knight"],
 	)
 
+## Bandit Pawn — moves in a cross (4 ortho neighbors), attacks in an X (4
+## diagonals). No double-push. No promotion. Symmetric: same moveset for
+## both colors. PIECE-VARIANTS.md §2.1.
+static func _make_bandit_pawn() -> PieceDef:
+	return _make_piece(
+		"bandit_pawn", "Bandit Pawn", "✠",
+		1, 1, false, false,
+		[
+			_make_pat(MovePattern.Kind.LEAPER, CROSS_OFFS, 0, false, true),
+			_make_pat(MovePattern.Kind.LEAPER, X_OFFS,     0, true,  false),
+		],
+	)
+
+## Assassin Bishop — jumps up to 2 squares diagonally, ignoring blockers.
+## Range capped via the offset list itself (LEAPER offsets are explicit).
+## PIECE-VARIANTS.md §2.2.
+static func _make_assassin_bishop() -> PieceDef:
+	return _make_piece(
+		"assassin_bishop", "Assassin Bishop", "♗",
+		2, 1, false, false,
+		[_make_pat(MovePattern.Kind.LEAPER, ASSASSIN_OFFS)],
+	)
+
+## Alter Ego Knight — knight-shape moves (non-capture), king-shape attacks
+## (capture-only). Inherits the on-hit freeze from the regular knight.
+## PIECE-VARIANTS.md §2.3.
+static func _make_alter_knight() -> PieceDef:
+	return _make_piece(
+		"alter_knight", "Alter Ego Knight", "♘",
+		2, 1, false, false,
+		[
+			_make_pat(MovePattern.Kind.LEAPER, KNIGHT_OFFS, 0, false, true),
+			_make_pat(MovePattern.Kind.LEAPER, KING_OFFS,   0, true,  false),
+		],
+		_make_effect(StatusEffectDef.Kind.FREEZE, 0, 1),
+	)
+
+## Variant catalog — keyed by base slot. Order matters: index 0 is the
+## default/regular variant for that slot. CustomizationScene reads this
+## directly to populate the variant picker. Slots with only one variant
+## still appear so the picker can show "no choices yet" for them.
+static func make_variants_map() -> Dictionary:
+	return {
+		"pawn":   [_make_regular_pawn(),   _make_bandit_pawn()],
+		"bishop": [_make_regular_bishop(), _make_assassin_bishop()],
+		"knight": [_make_regular_knight(), _make_alter_knight()],
+		"rook":   [_make_regular_rook()],
+		"queen":  [_make_regular_queen()],
+		"king":   [_make_regular_king()],
+	}
+
+## Slot order — the order in which slots appear in the variant picker, and
+## also used to lay out the back rank in `rebuild_initial_setup`.
+static func variant_slots() -> Array:
+	return ["pawn", "knight", "bishop", "rook", "queen", "king"]
+
+static func default_variant_selection() -> Dictionary:
+	## All slots default to their first (regular) variant.
+	var sel: Dictionary = {}
+	for slot in variant_slots():
+		sel[slot] = slot   ## variant id == slot id for the regulars
+	return sel
+
+## Build the full piece-id → PieceDef map containing every variant from
+## every slot. Used so promotion targets (which reference ids by string)
+## always find a def, even if the player hasn't selected that variant for
+## the relevant slot. Cheap (~9 entries) and avoids walking promotes_to
+## chains — see PIECE-VARIANTS.md §3.4 (option 1).
+static func build_full_pieces_map() -> Dictionary:
+	var out: Dictionary = {}
+	var vmap := make_variants_map()
+	for slot in vmap.keys():
+		for def in vmap[slot]:
+			out[def.id] = def
+	return out
+
+static func make_default_config() -> GameConfig:
+	var cfg := GameConfig.new()
+	cfg.pieces = build_full_pieces_map()
+
 	## Global abilities — both players share these specs but each has their
 	## own runtime charges (GameState.cannon_state / .lightning_state).
 	## Only one of them is active at a time per cfg.enabled_ability.
@@ -141,15 +243,6 @@ static func make_default_config() -> GameConfig:
 	cfg.lightning = make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1, 3)
 	cfg.enabled_ability = SpecialAbilityDef.Kind.LIGHTNING
 
-	## Standard opening setup. Index 0 = a1.
-	var back: Array[String] = ["rook","knight","bishop","queen","king","bishop","knight","rook"]
-	var setup: Array = []
-	setup.resize(64)
-	for f in 8:
-		setup[f]      = { "id": back[f], "color": 0 }
-		setup[8 + f]  = { "id": "pawn",  "color": 0 }
-		setup[48 + f] = { "id": "pawn",  "color": 1 }
-		setup[56 + f] = { "id": back[f], "color": 1 }
-	cfg.initial_setup = setup
-
+	cfg.variant_selection = default_variant_selection()
+	cfg.rebuild_initial_setup()
 	return cfg
