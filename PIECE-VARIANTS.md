@@ -42,9 +42,16 @@ In scope:
 - Three new piece variants (Bandit Pawn, Assassin Bishop, Alter Ego
   Knight) plus a cosmetic refresh on the Knight.
 - Variant picker UI replacing the current movement/stat editor.
-- Spritesheet-based animation pipeline (idle, move, attack, hit, death)
+- Spritesheet-based animation pipeline (`move`, `attack`, `hit`,
+  `death`, plus `move_jump` and `attack_lunge` specializations)
   generated programmatically from ASCII patterns, the same way static
-  sprites are produced today.
+  sprites are produced today. **Pieces stay on a static frame between
+  events** — no idle bob.
+- Overlay & UI motion: selected-piece pulse, move-overlay alpha pulse,
+  ability HUD ready pulse, ability target preview pulse, cannon and
+  debris telegraph pulses.
+- Ability & hazard FX spritesheets: cannon resolve, debris fall, and
+  lightning strike — played on the corresponding resolve events.
 - Knight move animation upgraded from straight-tween to parabolic jump.
 
 Out of scope (first cut):
@@ -346,39 +353,60 @@ former in the direction of the latter, in GDScript at runtime.
   squash sells "jump" in a way pure motion cannot.
 - The architectural change is small (see §4.5).
 
-### 4.2 Native resolution
+### 4.2 Motion philosophy: static by default, motion is information
 
-Stay at **16×16 native** for now. Risks:
+Universal idle bobs on every piece are visually noisy and compete for
+attention during the player's *thinking* phase. The board should feel
+static and analyzable when nobody is acting.
 
-- A 16×16 idle bob has only a few rows of headroom for vertical motion;
-  the silhouette can look cramped. Acceptable trade-off given existing
-  pattern art is at this size.
-- If Phase 1 (idle bobs on existing pieces) shows the motion is mushy,
-  upscale **before** authoring more frames — re-doing 6 patterns at
-  24px is fine, re-doing 100 frames is not.
+The rule: **a piece only animates when something is happening to it
+or with it.** Ambient motion lives on overlays and UI, not on pieces.
 
-### 4.3 Animation set
+| Surface | Motion treatment |
+|---|---|
+| **Unselected pieces** | Static. Single frame. No bob, no sway. |
+| **Selected piece** | Subtle scale-pulse or outline glow tween — confirms what was clicked, draws the eye. |
+| **Move-overlay squares** (green = move, red = capture) | Gentle alpha pulse on the highlight tint. Directional attention only. |
+| **Ability HUD ready indicator** | Pulse on the ability icon when charges > 0 AND energy ≥ cost. |
+| **Ability target previews** (cannon plus, lightning candidates) | Alpha pulse on the candidate squares while aiming. |
+| **Pieces during events** | `move`, `attack`, `hit`, `death`, `move_jump`, `attack_lunge` — sprite animations played one-shot when the corresponding event fires, then return to static frame. |
 
-Per-variant animation list:
+This gives ambient motion *only* in places where the player is
+actively engaging with the UI, while keeping the board itself calm.
+
+### 4.3 Native resolution
+
+Stay at **16×16 native** for now. The risk is that 16×16 has limited
+headroom for animation poses (squash/stretch, anticipation lean) —
+this only matters for `move`/`attack`/`move_jump`/`death`, since
+static idle has no motion budget at all. Phase 1 ships move/attack
+animations on the existing six pieces, which is the validation
+window: if 16×16 looks too cramped there, upscale to 24×24 or 32×32
+*before* authoring variant patterns in Phase 2.
+
+### 4.4 Animation set
 
 | Animation | Frames | Played when |
 |---|---|---|
-| `idle` | 4–6 (loop) | Default state; gentle bob / sway |
-| `move` | 6–8 (one-shot) | Piece moves to a new square (no capture) |
-| `attack` | 6–8 (one-shot) | Piece captures or damages |
+| (static frame) | 1 | Default; no animation playing |
+| `move` | 6–8 (one-shot) | Piece moves to an empty square |
+| `attack` | 6–8 (one-shot) | Piece captures or damages an enemy |
 | `hit` | 3 (one-shot) | Piece took damage but survived |
 | `death` | 4 (one-shot) | Piece HP reached zero |
+| `move_jump` | 6–8 (one-shot) | Knight / Alter Knight non-capture move |
+| `attack_lunge` | 6–8 (one-shot) | Alter Knight's king-shape attack |
 
-Knight + Alter Knight have an additional `move_jump` animation (the
-parabolic leap). Alter Knight's `attack` animation is the king-style
-straight-line lunge. Bandit Pawn's `move` is a cross-step shuffle and
-its `attack` is an X-pounce.
+There is no `idle` loop. Pieces sit on a single static frame between
+events. After a one-shot animation finishes (`animation_finished`
+signal), the sprite returns to the static frame.
 
-`hit` and `death` can be shared across all variants for v1 (a flash +
-crumple animation works for any silhouette). Specialize later only if
-needed.
+Bandit Pawn's `move` is a cross-step shuffle and its `attack` is an
+X-pounce — same animation slots, variant-specific authored content.
 
-### 4.4 Move-to-animation mapping
+`hit` and `death` can be shared across all variants for v1 (flash +
+crumple works for any silhouette). Specialize later only if needed.
+
+### 4.5 Move-to-animation mapping
 
 The renderer needs to pick the right animation when a move is played.
 Inputs available: `Move` dict from `Rules.apply_move()` events, plus
@@ -387,17 +415,17 @@ the `def_id` of the piece on the from-square at apply time.
 Mapping rules:
 
 ```
-event.kind == "move":
-    if def_id is "knight" or "alter_knight" and not has("capture"):
+event.kind == "move" (no capture):
+    if def_id is "knight" or "alter_knight":
         play "move_jump"
     else:
         play "move"
 
 event.kind == "damage" or "kill" (with attacker on from-square):
     if def_id is "alter_knight":
-        play "attack" (king-lunge animation)
+        play "attack_lunge"
     else:
-        play "attack" (default for that variant)
+        play "attack"
 
 event.kind == "damage" on victim square (victim survives):
     play "hit" on victim
@@ -408,15 +436,17 @@ event.kind == "kill" on victim square:
 No new fields on the move dict needed. The renderer keys off
 `m.has("capture")` and the piece's `def_id`.
 
-### 4.5 SpriteFactory migration
+### 4.6 SpriteFactory migration
 
 Today: `SpriteFactory.piece_texture(id, color) -> Texture2D` produces
 a single static texture per (id, color), cached.
 
 Target API: `SpriteFactory.piece_frames(id, color) -> SpriteFrames`,
 returning a Godot `SpriteFrames` resource with named animations
-(`"idle"`, `"move"`, `"attack"`, `"hit"`, `"death"`, plus
-`"move_jump"` for knights). Cached identically.
+(`"move"`, `"attack"`, `"hit"`, `"death"`, plus `"move_jump"` for
+knights and `"attack_lunge"` for alter knight). Cached identically.
+The static idle texture lives on as the sprite's default frame —
+it's just `_pattern_for(id)` rendered once.
 
 Internal structure:
 
@@ -425,13 +455,15 @@ static func piece_frames(piece_id: String, color: int) -> SpriteFrames:
     var key := "piece_frames:%s:%d" % [piece_id, color]
     if _cache.has(key): return _cache[key]
     var sf := SpriteFrames.new()
-    _add_idle(sf, piece_id, color)
+    _add_static(sf, piece_id, color)        # default frame, no loop
     _add_move(sf, piece_id, color)
     _add_attack(sf, piece_id, color)
     _add_hit(sf, piece_id, color)
     _add_death(sf, piece_id, color)
     if _piece_has_jump(piece_id):
         _add_move_jump(sf, piece_id, color)
+    if _piece_has_lunge(piece_id):
+        _add_attack_lunge(sf, piece_id, color)
     _cache[key] = sf
     return sf
 ```
@@ -439,14 +471,15 @@ static func piece_frames(piece_id: String, color: int) -> SpriteFrames:
 Each `_add_*` builds frames from the variant's pattern + an
 animation-specific transform applied per frame:
 
-- `idle` — vertical 1-pixel bob; copy pattern, shift body rows by 0
-  for half the frames and by -1 for the other half, alternated to
-  produce a sway.
+- `_add_static` — single frame; the existing `_pattern_for(id)`
+  output. No loop animation.
 - `move` — same body, with motion lines or a slight forward lean
   on intermediate frames.
 - `attack` — wind-up frame (slight back-lean), strike frame (forward
-  lunge), recoil frame (pulled back). For the alter knight's straight
-  lunge, exaggerate the strike-frame forward extension.
+  lunge), recoil frame (pulled back).
+- `attack_lunge` (alter knight) — exaggerated forward extension on
+  the strike frame, sustained recoil. Sells the king-shape attack as
+  a deliberate stab vs. the `attack` shake.
 - `move_jump` (knight, alter knight) — squash before liftoff,
   tucked-leg silhouette mid-air, landing dust + squash on touchdown.
   The vertical arc itself is still a tween on the Y position; the
@@ -458,7 +491,30 @@ The pattern-mutation helpers should compose, so a variant's `attack`
 animation is just `_lunge(_pattern_for(id), strength)` not a new
 hand-authored array.
 
-### 4.6 GameScene rendering changes
+### 4.7 Overlay & UI motion helpers
+
+These are tween-based, not spritesheet-based — they apply to existing
+`ColorRect` / `TextureRect` overlays in [GameScene.gd](godot/scenes/GameScene.gd):
+
+- **Selected-piece pulse** — when a piece is selected, run a looping
+  scale tween (e.g. 1.0 → 1.06 → 1.0 over 0.6s) on its sprite, plus
+  optionally a soft outline modulate. Cancel and reset on deselect or
+  on move-applied.
+- **Move-overlay alpha pulse** — the green/red highlight rects on
+  legal-target squares get a looping `modulate.a` tween (e.g. 0.55 →
+  0.85 → 0.55 over 1.0s, all squares phase-aligned). Created when
+  the highlights are spawned, killed when they're cleared.
+- **Ability HUD ready pulse** — when `charges > 0 && energy >= cost`,
+  the ability icon background gets a slow pulse (1.5s period) on
+  modulate. When not ready, sit static and dimmed.
+- **Ability target preview pulse** — when an ability is being aimed,
+  the candidate-square overlays use the same alpha-pulse helper as
+  the move overlay, just with a different tint.
+
+Centralize these in a small helper (e.g. `UiMotion.pulse_alpha(node,
+period, low, high)`) so all four surfaces share a consistent feel.
+
+### 4.8 GameScene rendering changes
 
 Today [GameScene.gd line 376-385](godot/scenes/GameScene.gd#L376-L385)
 puts a `TextureRect` in each square. Migration:
@@ -466,18 +522,18 @@ puts a `TextureRect` in each square. Migration:
 - Replace `TextureRect` with `AnimatedSprite2D` (or `TextureRect` whose
   texture is swapped per-frame from a `SpriteFrames` resource — Godot
   supports both).
-- Default to `play("idle")`.
+- Default the sprite to its static frame (no loop playing).
 - On `move` events, play the correct one-shot animation, then return to
-  `idle` via `animation_finished`.
+  the static frame via `animation_finished`.
 - Existing position/knockback tweens stay — they layer on top of
   whatever animation is playing.
 
 The piece-render call site changes from
 `sprite.texture = SpriteFactory.piece_texture(p.def_id, p.color)` to
 `sprite.sprite_frames = SpriteFactory.piece_frames(p.def_id, p.color);
-sprite.play("idle")`.
+sprite.frame = 0` (static, no `play()` call).
 
-### 4.7 Knight jump arc tween
+### 4.9 Knight jump arc tween
 
 Independent of spritesheets: the move tween for normal knight and
 alter knight (when moving non-capture) gets a parabolic Y offset on
@@ -490,7 +546,122 @@ var y_offset := -arc_height * 4.0 * t * (1.0 - t)   # parabola peaking at t=0.5
 ```
 
 This is a few-line change in the existing `_animate_events` block in
-[GameScene.gd](godot/scenes/GameScene.gd).
+[GameScene.gd](godot/scenes/GameScene.gd). Ships in Phase 1 alongside
+the `move_jump` sprite animation.
+
+### 4.10 Ability & hazard FX animations
+
+Same event-driven, one-shot, "motion is information" rule as piece
+animations. These are sprite-driven impact effects played at the
+moment an ability resolves or a hazard lands. The telegraph overlays
+that PRECEDE these effects are tween-based pulses (see §4.7), not
+spritesheets — only the resolve moment is sprite-animated.
+
+Three new effect kinds, each generated programmatically by
+`SpriteFactory` via the same ASCII-pattern approach used for pieces:
+
+| Effect | API | Frames | Played when |
+|---|---|---|---|
+| Cannon resolve | `SpriteFactory.cannon_resolve_frames()` | 6–8 (one-shot) | `cannonResolved` event during turn-start tick |
+| Debris fall | `SpriteFactory.debris_fall_frames()` | 6–8 (one-shot) | `debrisResolved` event during turn-start tick |
+| Lightning strike | `SpriteFactory.lightning_strike_frames()` | 4–6 (one-shot) | `lightning` event during ability apply |
+
+#### Cannon resolve
+
+The cannon has no source piece on the board, so don't try to fly a
+projectile in from somewhere — that invents a fiction the rest of the
+game doesn't have. Use an **abstract impact** treatment:
+
+1. Reticle on the target square contracts inward (3 frames).
+2. Impact burst at the center of the plus (2–3 frames) — radial
+   white→orange flash, expanding ring.
+3. Plus-shape damage flashes — each of the 5 plus squares gets a
+   brief red modulate pulse, fired with a small per-arm delay so the
+   plus reads as a wave radiating outward (1 frame each).
+
+Color: orange/red core, matches the existing cannon icon palette
+([SpriteFactory.gd `_draw_cannon_icon`](godot/engine/SpriteFactory.gd#L421-L429)).
+Duration: ~0.6s total — bigger investment, more dramatic payoff.
+
+#### Debris fall
+
+Falling-from-the-sky treatment fits the Moon stage's literal premise.
+Sprite sequence per target square:
+
+1. Shadow on the ground square grows from small to full size (3–4
+   frames) — sells the "something heavy is falling toward this
+   square" beat. Plays during the resolve tick, NOT during the
+   telegraph window (telegraph uses an alpha-pulse warning overlay,
+   §4.7).
+2. Debris piece drops in from above the board, scaling in vertically
+   (2–3 frames) — gray rocky pixel cluster, stage-palette consistent.
+3. Impact burst — dust ring + brief screen-relative shake on that
+   square (1–2 frames).
+
+Color: cool grey/violet matching the moon-stage tile palette
+(`MOON_DARK_*` / `MOON_LIGHT_*` in [SpriteFactory.gd](godot/engine/SpriteFactory.gd#L33-L37)).
+Duration: ~0.45s — happens automatically and can repeat over a long
+game; lean shorter so it doesn't drag.
+
+#### Lightning strike
+
+Top-down strike. No telegraph — lightning is instant. Sprite sequence
+on target square:
+
+1. Bright white pre-flash on target (1 frame).
+2. Bolt — jagged vertical strike from top-of-square to center (2
+   frames), wide for 1 frame and narrow for the next.
+3. Afterglow — yellow→white fade on target (2 frames).
+
+Color: yellow/white core, matches existing lightning icon
+([SpriteFactory.gd `_draw_lightning_icon`](godot/engine/SpriteFactory.gd#L388-L419)).
+Duration: ~0.35s — snappy, the player just clicked.
+
+#### Telegraph overlays use UiMotion pulses
+
+Cannon plus-shape preview (during the queued turn) and debris warning
+squares (during the 2–3-pair telegraph window) get the
+`UiMotion.pulse_alpha` treatment from §4.7. They're "your attention
+belongs here" markers — same category as move-overlay highlights, not
+the same as the resolve-moment spritesheets. Distinct visuals from
+the resolve animations: pulsing low-alpha overlay vs. high-energy
+sprite burst.
+
+#### Shared resolve-animation plumbing, distinct content
+
+Cannon and debris share the conceptual structure (telegraphed AOE →
+resolves on a future turn). Both should hook the same code path in
+GameScene — a `_play_aoe_resolve(squares: Array[int], kind: String)`
+helper that picks the sprite kind and plays it on each target square
+with appropriate per-square delay. Internally:
+
+```gdscript
+func _play_aoe_resolve(squares: Array[int], kind: String) -> void:
+    var frames := SpriteFactory.aoe_resolve_frames(kind)
+    for i in squares.size():
+        var sq: int = squares[i]
+        var delay := i * 0.04   # small ripple
+        _play_fx_sprite_at(sq, frames, delay)
+```
+
+Lightning is single-target so it doesn't share this helper — it gets
+its own `_play_lightning_at(sq)` path.
+
+#### Event hookup
+
+The existing event stream already emits exactly the right events
+([Rules.gd](godot/engine/Rules.gd)):
+
+- `cannonResolved` — emitted by `_resolve_pending_cannons` ([Rules.gd:639](godot/engine/Rules.gd#L639))
+- `debrisResolved` — emitted by `_tick_stage_hazards` ([Rules.gd:681](godot/engine/Rules.gd#L681))
+- `lightning` — emitted by `apply_ability` ([Rules.gd:1065](godot/engine/Rules.gd#L1065))
+
+The renderer's existing `_animate_events` loop dispatches on
+`event.kind`. Add three new branches that call the helpers above. The
+`damage`/`kill` events that follow each AOE resolve still fire and
+play `hit`/`death` on the affected pieces — those layer on top of the
+AOE FX naturally (impact burst plays on the square, then the
+piece-on-that-square's `hit` or `death` plays).
 
 ---
 
@@ -578,34 +749,77 @@ field.
 
 Each phase is independently shippable and testable. Don't bundle.
 
-### Phase 1 — Spritesheet pipeline (no new pieces, no rules changes)
+### Phase 1 — Motion pass on existing pieces (no new pieces, no rules changes)
 
-**Goal:** prove the SpriteFrames migration works at board scale before
-investing in variant art.
+**Goal:** ship the full "static-by-default, motion-is-information"
+treatment for the existing 6-piece game. Build the spritesheet
+pipeline AND the overlay/UI pulse system in one pass, validated
+against pieces that already have art.
 
 Tasks:
 
 1. Add `piece_frames(id, color) -> SpriteFrames` to
    [SpriteFactory.gd](godot/engine/SpriteFactory.gd) alongside the
-   existing `piece_texture`.
-2. Implement `_add_idle` for all 6 existing pieces — gentle 4-frame
-   bob.
+   existing `piece_texture`. Static frame + `move` + `attack` + `hit`
+   + `death` + `move_jump` (knight only).
+2. Author the per-frame pattern transforms (`_lunge`, `_squash`,
+   `_jump_pose`, etc.) so animations are composed from the existing
+   ASCII patterns rather than hand-drawn frame-by-frame.
 3. Swap [GameScene.gd](godot/scenes/GameScene.gd) board renderer from
-   `TextureRect` to `AnimatedSprite2D` (or equivalent), playing
-   `"idle"` by default.
-4. Verify: the board still reads cleanly at the existing zoom; idle
-   bobs are visible but not distracting; no perf regression with 32
-   simultaneous animated sprites.
+   `TextureRect` to `AnimatedSprite2D` (or equivalent). Default to
+   the static frame; no loop playing.
+4. Wire move-to-animation mapping per §4.5 — play `move`, `attack`,
+   `move_jump`, `hit`, `death` on the corresponding events; return to
+   static frame on `animation_finished`.
+5. Add the parabolic Y-arc tween for knight non-capture moves
+   (§4.9), layered with the `move_jump` sprite animation.
+6. Build `UiMotion` helper (§4.7) and apply pulses to:
+   - selected-piece scale-pulse + outline glow,
+   - move-overlay alpha pulse (legal-target highlights),
+   - ability HUD ready pulse (icon when charges > 0 && energy ≥ cost),
+   - ability target preview pulse (during aiming),
+   - cannon plus-shape telegraph (during queued turn),
+   - debris warning squares (during 2–3-pair telegraph window).
+7. Add ability/hazard FX spritesheets per §4.10:
+   - `SpriteFactory.cannon_resolve_frames()` — abstract reticle →
+     impact burst → plus-shape damage flashes.
+   - `SpriteFactory.debris_fall_frames()` — shadow grow → debris drop
+     → impact dust.
+   - `SpriteFactory.lightning_strike_frames()` — pre-flash → bolt →
+     afterglow.
+8. Add `_play_aoe_resolve(squares, kind)` and `_play_lightning_at(sq)`
+   helpers in [GameScene.gd](godot/scenes/GameScene.gd); hook them
+   from `_animate_events` on `cannonResolved`, `debrisResolved`, and
+   `lightning` events (§4.10).
 
-**Decision gate:** if 16×16 looks too cramped for animation, upscale
-patterns to 24×24 here, before authoring move/attack frames.
+**Decision gate:** if 16×16 looks too cramped for the move/attack/jump
+animations, upscale patterns here, *before* authoring variant patterns
+in Phase 2. Re-doing 6 patterns at 24px is fine; re-doing 9+ is not.
 
-**Ship:** existing customization UI unchanged. Only visual change is
-that pieces now bob on the board.
+**Verification:**
+
+- Sit on the board with no piece selected for 30 seconds — board is
+  visually quiet, no ambient motion.
+- Click a piece — it pulses, legal-target overlays pulse.
+- Play a knight move — sprite shows jump pose, position arcs, lands.
+- Trigger an ability charge full → HUD icon pulses; aim it → candidate
+  squares pulse.
+- Fire cannon → plus-shape telegraph pulses on opponent's turn →
+  resolve animation plays at next turn-start (reticle, burst, plus
+  flashes).
+- Fire lightning → bolt strike plays on target square within ~0.35s.
+- Play a Moon-stage game until debris queues → warning squares pulse
+  during telegraph window → debris fall animation plays on resolve.
+- Run existing test suite — no engine regressions (rules untouched).
+
+**Ship:** existing 6-piece game now has full event-driven sprite
+animation + overlay/UI pulse polish + ability/hazard FX. Customization
+UI unchanged.
 
 ### Phase 2 — Variant system + new pieces
 
-**Goal:** ship the three new variants with their gameplay mechanics.
+**Goal:** ship the three new variants with their gameplay mechanics
+on top of Phase 1's animation infrastructure.
 
 Tasks:
 
@@ -621,50 +835,30 @@ Tasks:
 5. Replace [CustomizationScene.gd](godot/scenes/CustomizationScene.gd)
    editor pane with the variant picker grid (§5.1). Keep the ability
    editor sub-page.
-6. Add `move`, `attack`, `hit`, `death` animations to
-   `SpriteFactory.piece_frames` for all variants. Reuse `hit` and
-   `death` across variants.
+6. Add patterns + animations for `bandit_pawn`, `assassin_bishop`,
+   `alter_knight` to `SpriteFactory.piece_frames`. Reuse `hit` and
+   `death` across variants. Variant-specific motion:
+   - Bandit Pawn: cross-step `move`, X-pounce `attack`.
+   - Assassin Bishop: short telegraph + jump-arrival flash on `move`.
+   - Alter Knight: `move_jump` for non-captures (already wired in
+     Phase 1's mapping), `attack_lunge` for captures (king-shape).
 
 **Verification:**
 
 - Spawn a board with each new variant; play a few moves with each.
 - Verify bandit pawn cannot promote and cannot double-push.
-- Verify assassin bishop can land on a square with a friendly piece
-  blocking the line (it can't, friendlies still block landing — but it
-  *can* hop *over* a blocker to reach an empty square, which the test
-  should confirm).
+- Verify assassin bishop can hop *over* a blocker to land on an empty
+  square, but cannot land on a friendly.
 - Verify alter knight uses knight-shape for non-captures and
   king-shape for captures via legal-move enumeration.
+- Verify renderer plays `move_jump` for alter knight non-capture and
+  `attack_lunge` for alter knight captures.
 - Run existing test suite — no engine regressions.
 
 **Ship:** customization screen now offers variant selection. New
-pieces are playable. Animations: idle + move/attack are sprite-driven.
+pieces are playable with their full motion treatment.
 
-### Phase 3 — Polish: knight jump, attack animations, special motion
-
-**Goal:** the variants *feel* different in motion.
-
-Tasks:
-
-1. Add `move_jump` animation to `SpriteFactory.piece_frames` for
-   knight + alter knight.
-2. Add parabolic Y-arc tween in [GameScene.gd](godot/scenes/GameScene.gd)
-   move animator, gated on the piece being a knight variant moving
-   non-capture.
-3. Add the king-lunge attack animation specifically for alter knight
-   (longer forward extension on the strike frame, sustained recoil).
-4. Add bandit pawn's cross-step move animation and X-pounce attack
-   animation.
-5. Tune `ANIM_MOVE_DURATION` per piece if needed (knight jumps may
-   want a slightly longer beat to sell the arc).
-
-**Verification:** play a full hot-seat game using new variants; gut
-check that animations read well and don't drag pacing.
-
-**Ship:** full variant differentiation in motion. Good enough for an
-end-to-end "polished" feel.
-
-### Phase 4 (deferred) — stretch
+### Phase 3 (deferred) — stretch
 
 Out-of-scope-but-noted-in-case:
 
@@ -681,10 +875,11 @@ Out-of-scope-but-noted-in-case:
 
 | File | Phase | Change |
 |---|---|---|
+| [godot/engine/SpriteFactory.gd](godot/engine/SpriteFactory.gd) | 1, 2 | Add `piece_frames(id, color)` returning `SpriteFrames`; static + move + attack + hit + death + move_jump for existing 6 pieces (P1); add `cannon_resolve_frames`, `debris_fall_frames`, `lightning_strike_frames` (P1); add patterns + animations for `bandit_pawn`, `assassin_bishop`, `alter_knight`, plus `attack_lunge` for alter knight (P2) |
+| [godot/scenes/GameScene.gd](godot/scenes/GameScene.gd) | 1 | Swap `TextureRect` → `AnimatedSprite2D`; route move/attack/hit/death events to animations per §4.5; add knight jump arc tween; integrate `UiMotion` helper for selected-piece pulse, move-overlay pulse, ability-HUD pulse, ability-target pulse, cannon/debris telegraph pulses; add `_play_aoe_resolve` and `_play_lightning_at` helpers wired to `cannonResolved` / `debrisResolved` / `lightning` events |
+| **new** `godot/engine/UiMotion.gd` | 1 | Helper for shared alpha/scale pulse tweens on UI nodes |
 | [godot/engine/data/GameConfig.gd](godot/engine/data/GameConfig.gd) | 2 | Add `variant_selection` dict; add `rebuild_initial_setup()` |
 | [godot/engine/Defaults.gd](godot/engine/Defaults.gd) | 2 | Add new offset constants; split `_make_piece` calls into per-variant factories; add `_make_variants_map`; default `variant_selection` |
-| [godot/engine/SpriteFactory.gd](godot/engine/SpriteFactory.gd) | 1, 2, 3 | Add `piece_frames(id, color)`; idle bob (P1); move/attack/hit/death (P2); jump + lunge specializations (P3); add patterns for `bandit_pawn`, `assassin_bishop`, `alter_knight` (P2) |
-| [godot/scenes/GameScene.gd](godot/scenes/GameScene.gd) | 1, 3 | Swap `TextureRect` → animated sprite; route move/attack events to animations; add knight jump arc tween (P3) |
 | [godot/scenes/CustomizationScene.gd](godot/scenes/CustomizationScene.gd) | 2 | Replace per-piece editor pane with variant picker grid; keep ability sub-page; remove movement-toggle helpers (`_infer_toggles`, `_toggles_to_patterns`, related field handlers) |
 | [godot/autoloads/GameSettings.gd](godot/autoloads/GameSettings.gd) | 2 | On load, call `cfg.rebuild_initial_setup()`; default `variant_selection` for old saves missing the field |
 | [DESIGN.md](DESIGN.md) | 2 | New section: piece variants concept (brief — full detail lives in this doc) |
