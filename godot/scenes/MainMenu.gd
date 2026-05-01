@@ -50,6 +50,44 @@ func _ready() -> void:
     btn_customize.pressed.connect(func(): open_customization.emit())
     vb.add_child(btn_customize)
 
+    ## Stage picker — Classic (no hazards) vs. Moon (procedural debris that
+    ## lands symmetrically on both halves at the end of each turn pair).
+    ## Saved into the active GameConfig so the choice persists across runs
+    ## alongside customization data.
+    vb.add_child(_make_stage_picker())
+
+func _make_stage_picker() -> Control:
+    var row := HBoxContainer.new()
+    row.alignment = BoxContainer.ALIGNMENT_CENTER
+    row.add_theme_constant_override("separation", 10)
+
+    var lbl := Label.new()
+    lbl.text = "Stage"
+    lbl.add_theme_color_override("font_color", ACCENT)
+    lbl.modulate = Color(1, 1, 1, 0.75)
+    lbl.add_theme_font_size_override("font_size", 16)
+    row.add_child(lbl)
+
+    var opt := OptionButton.new()
+    opt.add_item("Classic", 0)
+    opt.set_item_metadata(0, "classic")
+    opt.add_item("Moon (debris)", 1)
+    opt.set_item_metadata(1, "moon")
+    opt.custom_minimum_size = Vector2(180, 36)
+    var current := "classic"
+    if GameSettings.active_config != null and GameSettings.active_config.stage != "":
+        current = GameSettings.active_config.stage
+    opt.select(1 if current == "moon" else 0)
+    opt.item_selected.connect(_on_stage_selected.bind(opt))
+    row.add_child(opt)
+    return row
+
+func _on_stage_selected(idx: int, opt: OptionButton) -> void:
+    var stage := String(opt.get_item_metadata(idx))
+    if GameSettings.active_config == null: return
+    GameSettings.active_config.stage = stage
+    GameSettings.save()
+
 func _make_btn(text: String) -> Button:
     var b := Button.new()
     b.text = text

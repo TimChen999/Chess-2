@@ -32,6 +32,11 @@ const ABILITY_LIGHT_TINT   := Color(0.50, 0.70, 1.00, 0.18)   ## selectable ligh
 const CANNON_HOVER_TINT    := Color(1.00, 0.30, 0.10, 0.55)   ## plus arms on hover
 const CANNON_CENTER_TINT   := Color(1.00, 0.95, 0.30, 0.78)   ## bullseye — click here
 const CANNON_PENDING_TINT  := Color(1.00, 0.60, 0.30, 0.32)   ## already-queued cannons
+## Debris warning tint deepens (orange → red) as impact gets closer. The
+## last-pair tint is the punchiest so the eye lands on the immediate threat
+## even when the board is busy with multiple queued hits.
+const DEBRIS_WARN_FAR      := Color(0.85, 0.55, 0.20, 0.30)   ## 2+ pairs out
+const DEBRIS_WARN_NEAR     := Color(1.00, 0.30, 0.20, 0.55)   ## 1 pair out (next pair)
 
 # ---------- runtime state ----------
 var state: GameState
@@ -423,6 +428,18 @@ func _render() -> void:
         for s in pa.target_squares:
             cannon_targets[s] = true
 
+    ## Debris warnings — for each pending hit, find the smallest "pairs
+    ## remaining" so a square covered by overlapping warnings shows the
+    ## most urgent (smallest) countdown. Always >= 1 here since debris
+    ## with triggers_on_fullmove == state.fullmove was already resolved
+    ## inside apply_move's tick before this render runs.
+    var debris_pairs_remaining := {}     ## sq -> int (pairs until impact)
+    for pd in state.pending_debris:
+        var pairs: int = maxi(pd.triggers_on_fullmove - state.fullmove, 1)
+        for s in pd.target_squares:
+            if not debris_pairs_remaining.has(s) or pairs < int(debris_pairs_remaining[s]):
+                debris_pairs_remaining[s] = pairs
+
     var hover_plus := {}
     if mode == "select_ability" and ability_ctx.get("kind") == SpecialAbilityDef.Kind.CANNON \
        and hover_target_sq >= 0:
@@ -445,7 +462,8 @@ func _render() -> void:
         var f := sq & 7
         var r := sq >> 3
         var is_dark := (f + r) % 2 == 0
-        bg.texture = SpriteFactory.tile_texture(is_dark)
+        var stage := state.config.stage if state.config != null else "classic"
+        bg.texture = SpriteFactory.tile_texture_for_stage(is_dark, stage)
         bg.modulate = Color.WHITE
         hl.color = Color(0, 0, 0, 0)
         sprite.texture = null
@@ -456,6 +474,9 @@ func _render() -> void:
 
         # Layered overlays (later overrides earlier). All overlays are
         # translucent so the tile + piece beneath stays visible.
+        if debris_pairs_remaining.has(sq):
+            var pairs: int = int(debris_pairs_remaining[sq])
+            hl.color = DEBRIS_WARN_NEAR if pairs <= 1 else DEBRIS_WARN_FAR
         if cannon_targets.has(sq):
             hl.color = CANNON_PENDING_TINT
         if (last_status.get("kind", "") == "check" or last_status.get("kind", "") == "checkmate") \
@@ -509,6 +530,15 @@ func _render() -> void:
                 elif e.kind == StatusEffectDef.Kind.FREEZE:
                     fx_parts.append("❄%d" % e.turns_remaining)
             fx_lbl.text = " ".join(fx_parts)
+
+        ## Debris countdown badge — render the impact-pair count on the
+        ## targeted square so the player can plan around the timing. Sits
+        ## in the FX slot when the square is empty, otherwise prepended
+        ## ahead of any status-effect glyphs.
+        if debris_pairs_remaining.has(sq):
+            var pairs: int = int(debris_pairs_remaining[sq])
+            var glyph := "☄%d" % maxi(pairs, 1)
+            fx_lbl.text = (glyph + " " + fx_lbl.text) if fx_lbl.text != "" else glyph
 
     # --- Status text ---
     var side_name := "White" if state.side == Rules.WHITE else "Black"
@@ -1054,6 +1084,50 @@ func _animate_events(old_state: GameState, events: Array) -> void:
                 tween.tween_property(fx, "scale", Vector2(1.85, 1.85), 0.30) \
                     .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
                 tween.tween_property(fx, "modulate:a", 0.0, 0.28).set_delay(0.22)
+            any = true
+
+        elif k == "debrisResolved":
+            ## Two-stage burst per impact: a streaking comet that falls in
+            ## from above the square, then an impact crater flash. Both
+            ## halves of the symmetric pair animate in parallel since they
+            ## share the same 'target' event.
+            for raw in ev.get("target", []):
+                var sq := int(raw)
+                var streak := _create_fx_label("☄", sq, Color(1.0, 0.8, 0.5))
+                floats.append(streak)
+                streak.position = _sq_to_pos(sq) + Vector2(0, -SQ_SIZE * 1.2)
+                streak.scale = Vector2(1.4, 1.4)
+                tween.tween_property(streak, "position",
+                    _sq_to_pos(sq), 0.28) \
+                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+                tween.tween_property(streak, "modulate:a", 0.0, 0.10) \
+                    .set_delay(0.24)
+                var crater := _create_fx_label("✸", sq, Color(1.4, 0.6, 0.3))
+                floats.append(crater)
+                crater.scale = Vector2(0.2, 0.2)
+                crater.modulate.a = 0.0
+                tween.tween_property(crater, "modulate:a", 1.0, 0.05) \
+                    .set_delay(0.24)
+                tween.tween_property(crater, "scale", Vector2(2.4, 2.4), 0.32) \
+                    .set_delay(0.24) \
+                    .set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+                tween.tween_property(crater, "modulate:a", 0.0, 0.20) \
+                    .set_delay(0.40)
+            any = true
+
+        elif k == "debrisQueued":
+            ## Brief "incoming" pulse on the freshly telegraphed pair — a
+            ## quick scale-bounce so the player notices the new threat
+            ## without missing it among existing warnings.
+            for raw in ev.get("target", []):
+                var sq := int(raw)
+                var ping := _create_fx_label("◌", sq, Color(1.0, 0.7, 0.3))
+                floats.append(ping)
+                ping.scale = Vector2(0.4, 0.4)
+                tween.tween_property(ping, "scale", Vector2(2.0, 2.0), 0.25) \
+                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+                tween.tween_property(ping, "modulate:a", 0.0, 0.22) \
+                    .set_delay(0.10)
             any = true
 
     if any:

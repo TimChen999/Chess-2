@@ -11,6 +11,14 @@ var ep: int = -1                        ## en-passant target square; -1 if none
 var halfmove: int = 0                   ## 50-move rule counter
 var fullmove: int = 1
 var pending_attacks: Array[PendingAttack] = []
+## Moon stage hazards. Empty for classic stage. Populated and resolved by
+## Rules._tick_stage_hazards (white-turn-start tick). Each entry is a pair
+## of mirrored squares scheduled to land on triggers_on_fullmove.
+var pending_debris: Array[PendingDebris] = []
+## Per-game RNG used by stage hazards. clone_state deep-copies the RNG
+## state so simulated apply_move calls (legal-move filter) don't pollute
+## the real game's hazard sequence.
+var rng: RandomNumberGenerator = null
 var special_used_this_turn: bool = false
 ## Snapshot of starting positions per color, used by Cannon's enemy-zone
 ## guard. [white_dict, black_dict], each dict: int square -> bool.
@@ -39,6 +47,12 @@ func clone_state() -> GameState:
 	c.fullmove = fullmove
 	for pa in pending_attacks:
 		c.pending_attacks.append(pa.clone())
+	for pd in pending_debris:
+		c.pending_debris.append(pd.clone())
+	if rng != null:
+		c.rng = RandomNumberGenerator.new()
+		c.rng.seed = rng.seed
+		c.rng.state = rng.state
 	c.special_used_this_turn = special_used_this_turn
 	c.initial_squares_by_color = [
 		initial_squares_by_color[0].duplicate(),

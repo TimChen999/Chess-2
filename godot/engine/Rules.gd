@@ -45,6 +45,16 @@ const CANNON_PLUS_OFFSETS: Array[Vector2i] = [
 	Vector2i(0, 1), Vector2i(0, -1),
 ]
 
+## Moon stage: which ranks debris is allowed to spawn on. Ranks 2-3 are
+## white's half; we mirror to ranks 4-5 (= 7 - rank) for black's half.
+## Back two rows on each side (ranks 0-1 and 6-7) are off-limits so the
+## piece-start zones stay clear.
+const DEBRIS_SPAWN_RANKS_WHITE_HALF: Array[int] = [2, 3]
+## Telegraph window — debris is announced this many pairs in advance, then
+## lands at the end of the chosen pair. randi_range(min, max) inclusive.
+const DEBRIS_TELEGRAPH_MIN := 2
+const DEBRIS_TELEGRAPH_MAX := 3
+
 # ---------------------------------------------------------------------------
 # COORDINATE HELPERS
 # Square indexing: sq = rank * 8 + file. Rank 0 = white's back rank, rank 7
@@ -124,6 +134,12 @@ static func new_game(config: GameConfig) -> GameState:
 	## energy at game start; Black gets theirs after White's first move
 	## flips the side (which runs the turn-start tick — see apply_move).
 	s.energy = [1, 0]
+
+	## Per-game RNG for stage hazards. Randomized once at new_game so each
+	## new match has its own debris sequence; clone_state deep-copies so
+	## legal-move-filter simulations don't mutate the real sequence.
+	s.rng = RandomNumberGenerator.new()
+	s.rng.randomize()
 
 	return s
 
@@ -502,10 +518,13 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 	## Flip side.
 	next.side = opposite(state.side)
 
-	## TURN-START TICK on new side. Order: cannons → effects → recharge → energy.
-	## Energy ticks last so the freshly-gained drop is visible in the same
-	## turn the player can spend it.
+	## TURN-START TICK on new side. Order: cannons → stage hazards → effects
+	## → recharge → energy. Stage hazards run BEFORE status effects so a
+	## debris-killed piece doesn't also tick burn/freeze on a corpse. Energy
+	## ticks last so the freshly-gained drop is visible in the same turn the
+	## player can spend it.
 	_resolve_pending_cannons(next, events)
+	_tick_stage_hazards(next, events)
 	_tick_status_effects(next, events)
 	_tick_ability_recharge(next)
 	_tick_energy_gain(next)
@@ -620,6 +639,86 @@ static func _resolve_pending_cannons(state: GameState, events: Array) -> void:
 		events.append({ "kind": "cannonResolved",
 						"target": pa.target_squares.duplicate() })
 	state.pending_attacks = still_pending
+
+## Moon stage hazards. Runs on every turn-start tick; gates internally on
+## stage == "moon" and on side-to-move == WHITE (= end-of-pair boundary, the
+## one tick per pair where debris is allowed to fire). This makes the timing
+## fair: between any two of either color's moves, exactly ONE debris event
+## occurs, and it damages both halves of the board simultaneously (mirror).
+##
+## Two phases:
+##   (1) RESOLVE — any pending debris with triggers_on_fullmove == fullmove
+##       deals damage to whatever piece is on each target square (no push,
+##       no on-hit effect — same model as Cannon resolution).
+##   (2) SPAWN  — with config.debris_spawn_chance probability, roll a fresh
+##       hit: pick a square on white's half (ranks 2-3), mirror to black's
+##       half (rank = 7 - rank), telegraph 2-3 pairs ahead. Spawn pool
+##       skips the back two ranks on each side so opening setups stay
+##       untouched.
+static func _tick_stage_hazards(state: GameState, events: Array) -> void:
+	if state.config == null or state.config.stage != "moon": return
+	if state.side != WHITE: return                ## end-of-pair only
+	if state.rng == null:
+		state.rng = RandomNumberGenerator.new()
+		state.rng.randomize()
+
+	## (1) Resolve any debris due this fullmove.
+	var still_pending: Array[PendingDebris] = []
+	for pd: PendingDebris in state.pending_debris:
+		if pd.triggers_on_fullmove != state.fullmove:
+			still_pending.append(pd)
+			continue
+		for sq in pd.target_squares:
+			var v = state.board[sq]
+			if v == null: continue
+			if v.hp <= pd.damage:
+				events.append({ "kind": "kill", "sq": sq, "by": "debris" })
+				state.board[sq] = null
+			else:
+				v.hp -= pd.damage
+				events.append({ "kind": "damage", "sq": sq, "hp": v.hp,
+								"by": "debris" })
+		events.append({ "kind": "debrisResolved",
+						"target": pd.target_squares.duplicate() })
+	state.pending_debris = still_pending
+
+	## (2) Spawn — probabilistic. Avoid stacking multiple debris on the
+	## same square (would be visually confusing on the warning overlay)
+	## and avoid mirror-square pairs that already have a pending hit.
+	if state.rng.randf() >= state.config.debris_spawn_chance: return
+	var picked := _pick_debris_square(state)
+	if picked < 0: return
+
+	var pd := PendingDebris.new()
+	pd.damage = state.config.debris_damage
+	pd.target_squares = [picked, _mirror_square(picked)]
+	pd.triggers_on_fullmove = state.fullmove + state.rng.randi_range(
+		DEBRIS_TELEGRAPH_MIN, DEBRIS_TELEGRAPH_MAX)
+	state.pending_debris.append(pd)
+	events.append({ "kind": "debrisQueued",
+					"target": pd.target_squares.duplicate(),
+					"triggers_on": pd.triggers_on_fullmove })
+
+## Pick a random rank-2-or-3 square that doesn't already have pending debris
+## queued (on it OR its mirror). Returns -1 if every candidate is taken.
+static func _pick_debris_square(state: GameState) -> int:
+	var taken: Dictionary = {}
+	for pd: PendingDebris in state.pending_debris:
+		for s in pd.target_squares: taken[s] = true
+	var candidates: Array[int] = []
+	for r in DEBRIS_SPAWN_RANKS_WHITE_HALF:
+		for f in 8:
+			var sq := sq_of(f, r)
+			if taken.has(sq) or taken.has(_mirror_square(sq)): continue
+			candidates.append(sq)
+	if candidates.is_empty(): return -1
+	return candidates[state.rng.randi_range(0, candidates.size() - 1)]
+
+## Horizontal mirror across the rank-3.5 midline so a hit on white's half
+## hits the same file on black's half. Keeps the two halves' threat
+## geometry identical regardless of who moved first.
+static func _mirror_square(sq: int) -> int:
+	return sq_of(file_of(sq), 7 - rank_of(sq))
 
 static func _tick_status_effects(state: GameState, events: Array) -> void:
 	for i in 64:
@@ -747,6 +846,24 @@ static func next_turn_damage_budget(state: GameState, royal_sq: int,
 			if pa.triggers_on_fullmove != next_fullmove: continue
 			if pa.target_squares.has(royal_sq):
 				dmg += pa.damage
+	## Debris (Moon stage) — fires at white-turn-start = end-of-pair. From
+	## any state, the next debris fires at fullmove+1, and it lands BEFORE
+	## royal_color's next move opportunity in every case EXCEPT when royal
+	## is BLACK and state.side is WHITE (post-black-move state — that
+	## debris already fired in apply_move's tick or hasn't been queued yet
+	## for the relevant pair). Spelled out:
+	##   royal=WHITE, side=WHITE  → W-move, B-move, debris(N+1), W-next   ✓
+	##   royal=WHITE, side=BLACK  → B-move, debris(N+1), W-next           ✓
+	##   royal=BLACK, side=WHITE  → W-move, B-next                        ✗
+	##   royal=BLACK, side=BLACK  → B-move, debris(N+1), W, B-next        ✓
+	## So include unless (royal == BLACK and state.side == WHITE).
+	var royal_color := opposite(by_color)
+	if not (royal_color == BLACK and state.side == WHITE):
+		var debris_full := state.fullmove + 1
+		for pd in state.pending_debris:
+			if pd.triggers_on_fullmove != debris_full: continue
+			if pd.target_squares.has(royal_sq):
+				dmg += pd.damage
 	return dmg
 
 # =============================================================================

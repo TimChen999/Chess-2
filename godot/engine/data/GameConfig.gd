@@ -26,3 +26,15 @@ extends Resource
 ##   1 = SpecialAbilityDef.Kind.CANNON
 ##   2 = SpecialAbilityDef.Kind.LIGHTNING
 @export var enabled_ability: int = 2
+
+## Stage / arena. "classic" is the default chessboard with no environmental
+## hazards. "moon" enables procedural debris hits (Rules._tick_stage_hazards)
+## that land symmetrically on both halves at the end of each turn pair.
+##   "classic" | "moon"
+@export var stage: String = "classic"
+
+## Probability per pair-end (white turn-start tick) that a fresh debris hit
+## is rolled. Telegraph window is 2-3 pairs, sampled per spawn.
+@export var debris_spawn_chance: float = 0.55
+## Damage dealt by each debris hit to any piece on the targeted square.
+@export var debris_damage: int = 1

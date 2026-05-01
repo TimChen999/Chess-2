@@ -28,6 +28,14 @@ const TILE_LIGHT_B := Color(0.89, 0.81, 0.62)
 const TILE_DARK_A  := Color(0.55, 0.36, 0.22)
 const TILE_DARK_B  := Color(0.50, 0.32, 0.20)
 
+# --- Moon stage palette -----------------------------------------------------
+# Cool grey/violet regolith with subtle rim-light. Light tile reads as moon
+# dust under sunlight; dark tile reads as crater shadow.
+const MOON_LIGHT_A := Color(0.62, 0.62, 0.72)
+const MOON_LIGHT_B := Color(0.55, 0.55, 0.66)
+const MOON_DARK_A  := Color(0.20, 0.20, 0.28)
+const MOON_DARK_B  := Color(0.16, 0.16, 0.24)
+
 # --- UI palette ------------------------------------------------------------
 const ENERGY_FILL   := Color(0.32, 0.78, 0.96)
 const ENERGY_FILL_LIGHT := Color(0.62, 0.92, 1.00)
@@ -59,11 +67,21 @@ static func piece_texture_size(piece_id: String, color: int, _native: int) -> Te
 	return piece_texture(piece_id, color)   # alias; size is set by TextureRect
 
 static func tile_texture(is_dark: bool) -> Texture2D:
-	var key := "tile:%d" % (1 if is_dark else 0)
+	return tile_texture_for_stage(is_dark, "classic")
+
+## Stage-aware tile texture. Classic uses warm wood; Moon uses cool grey
+## regolith. New stages can be added by extending the match below.
+static func tile_texture_for_stage(is_dark: bool, stage: String) -> Texture2D:
+	var key := "tile:%s:%d" % [stage, 1 if is_dark else 0]
 	if _cache.has(key): return _cache[key]
 	var img := _new_image(NATIVE, NATIVE)
-	if is_dark: _draw_tile(img, TILE_DARK_A,  TILE_DARK_B)
-	else:       _draw_tile(img, TILE_LIGHT_A, TILE_LIGHT_B)
+	match stage:
+		"moon":
+			if is_dark: _draw_tile(img, MOON_DARK_A,  MOON_DARK_B)
+			else:       _draw_tile(img, MOON_LIGHT_A, MOON_LIGHT_B)
+		_:
+			if is_dark: _draw_tile(img, TILE_DARK_A,  TILE_DARK_B)
+			else:       _draw_tile(img, TILE_LIGHT_A, TILE_LIGHT_B)
 	_cache[key] = ImageTexture.create_from_image(img)
 	return _cache[key]
 
