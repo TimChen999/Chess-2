@@ -686,7 +686,19 @@ static func _move_survivable(state: GameState, m: Dictionary) -> bool:
 	var royal: Piece = next.board[my_royal]
 	if royal == null: return false
 	var threat := next_turn_damage_budget(next, my_royal, opposite(me))
-	return royal.hp > threat
+	if royal.hp <= threat: return false
+	return not _opp_can_remove_royal(next, me)
+
+# Simulate every opponent pseudo-legal move; return true if any of them leaves
+# me's royal off the board. Catches knockback off the edge and chain-push kills
+# that the HP-vs-damage budget can't see.
+static func _opp_can_remove_royal(state: GameState, me: int) -> bool:
+	var opp := opposite(me)
+	for om in pseudo_legal_moves(state, opp):
+		var rr := apply_move(state, om)
+		var after: GameState = rr["state"]
+		if find_royal(after, me) < 0: return true
+	return false
 
 # next-turn damage budget on royal_sq from by_color (the side whose threat
 # we're estimating).
@@ -735,7 +747,7 @@ static func game_status(state: GameState) -> Dictionary:
 		}
 	var royal: Piece = state.board[royal_sq]
 	var threat := next_turn_damage_budget(state, royal_sq, opposite(me))
-	var in_check := royal.hp <= threat
+	var in_check := royal.hp <= threat or _opp_can_remove_royal(state, me)
 	var moves := legal_moves(state)
 	if moves.is_empty():
 		if in_check:

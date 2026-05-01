@@ -830,7 +830,20 @@ function moveSurvivable(state, m) {
   // post-tick state and ask: at this moment, can opponent kill me on their
   // NEXT turn? Same formula:
   const threat = nextTurnDamageBudget(next, myRoyal, opposite(me));
-  return royal.hp > threat;
+  if (royal.hp <= threat) return false;
+  return !oppCanRemoveRoyal(next, me);
+}
+
+// Simulate every opponent pseudo-legal move; true if any of them leaves my
+// royal off the board. Catches knockback off the edge and chain-push kills
+// that the HP-vs-damage budget doesn't see.
+function oppCanRemoveRoyal(state, me) {
+  const opp = opposite(me);
+  for (const om of pseudoLegalMoves(state, opp)) {
+    const after = applyMove(state, om).state;
+    if (findRoyal(after, me) < 0) return true;
+  }
+  return false;
 }
 
 // next-turn damage budget on `royalSq` from `byColor` (the side whose threat
@@ -887,7 +900,7 @@ function gameStatus(state) {
   }
   const royal = state.board[royalSq];
   const threat = nextTurnDamageBudget(state, royalSq, opposite(me));
-  const inCheck = royal.hp <= threat;
+  const inCheck = royal.hp <= threat || oppCanRemoveRoyal(state, me);
   const moves = legalMoves(state);
   if (moves.length === 0) {
     return inCheck
