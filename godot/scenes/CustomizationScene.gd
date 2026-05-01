@@ -291,6 +291,8 @@ func _render_ability_editor(which: String) -> void:
         spec.damage,         1, 5,  _ability_setter.bind(spec, "damage")))
     stats.add_child(_int_field("Cooldown (turns)",
         spec.cooldown_turns, 1, 10, _ability_setter.bind(spec, "cooldown_turns")))
+    stats.add_child(_int_field("Energy cost",
+        spec.energy_cost,    0, 10, _ability_setter.bind(spec, "energy_cost")))
     stats.add_child(_int_field("Max charges",
         spec.max_charges,    1, 5,  _ability_setter.bind(spec, "max_charges")))
     stats.add_child(_int_field("Initial charges",
@@ -588,6 +590,7 @@ func _clone_special(s: SpecialAbilityDef) -> SpecialAbilityDef:
     d.cooldown_turns = s.cooldown_turns
     d.max_charges = s.max_charges
     d.initial_charges = s.initial_charges
+    d.energy_cost = s.energy_cost
     return d
 
 func _clone_piece_def(s: PieceDef) -> PieceDef:

@@ -47,13 +47,15 @@ static func _make_effect(kind: int, dpt: int = 0, dur: int = 0) -> StatusEffectD
 	return e
 
 static func make_special(kind: int, damage: int = 1, cd: int = 3,
-						 maxc: int = 1, init_c: int = 0) -> SpecialAbilityDef:
+						 maxc: int = 1, init_c: int = 0,
+						 energy_cost: int = 4) -> SpecialAbilityDef:
 	var s := SpecialAbilityDef.new()
 	s.kind = kind
 	s.damage = damage
 	s.cooldown_turns = cd
 	s.max_charges = maxc
 	s.initial_charges = init_c
+	s.energy_cost = energy_cost
 	return s
 
 static func _make_piece(id: String, display_name: String, glyph: String,
@@ -132,8 +134,11 @@ static func make_default_config() -> GameConfig:
 	## Global abilities — both players share these specs but each has their
 	## own runtime charges (GameState.cannon_state / .lightning_state).
 	## Only one of them is active at a time per cfg.enabled_ability.
-	cfg.cannon    = make_special(SpecialAbilityDef.Kind.CANNON,    2, 4, 1, 0)
-	cfg.lightning = make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1)
+	## (kind, damage, cooldown, max_charges, initial_charges, energy_cost).
+	## Energy costs roughly mirror Clash Royale's elixir costs: cheap quick
+	## strikes vs. expensive AOE. Both still gated by the per-turn cooldown.
+	cfg.cannon    = make_special(SpecialAbilityDef.Kind.CANNON,    2, 4, 1, 0, 5)
+	cfg.lightning = make_special(SpecialAbilityDef.Kind.LIGHTNING, 1, 3, 1, 1, 3)
 	cfg.enabled_ability = SpecialAbilityDef.Kind.LIGHTNING
 
 	## Standard opening setup. Index 0 = a1.

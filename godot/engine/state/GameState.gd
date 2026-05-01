@@ -21,6 +21,11 @@ var initial_squares_by_color: Array = [{}, {}]
 ## class_name resolution quirk that only manifests for newly-added files.)
 var cannon_state: Array = []
 var lightning_state: Array = []
+## Per-color energy ("elixir") pool — Length 2, each clamped 0..ENERGY_MAX.
+## Both players start at 0 and gain 1 at the start of each of their turns
+## (turn-start tick, after cannons/effects/recharge). Drained by ability
+## activation; ability fires only when energy >= spec.energy_cost.
+var energy: Array = [0, 0]
 
 func clone_state() -> GameState:
 	var c := GameState.new()
@@ -41,4 +46,5 @@ func clone_state() -> GameState:
 	]
 	for rt in cannon_state:    c.cannon_state.append((rt as Dictionary).duplicate())
 	for rt in lightning_state: c.lightning_state.append((rt as Dictionary).duplicate())
+	c.energy = energy.duplicate()
 	return c

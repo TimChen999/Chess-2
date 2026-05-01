@@ -33,6 +33,11 @@ extends RefCounted
 const WHITE := 0
 const BLACK := 1
 
+## Energy ("elixir") system: each player accrues 1/turn at turn-start, capped
+## at ENERGY_MAX. Abilities require energy >= spec.energy_cost AND cleared
+## cooldown. (DESIGN.md §7 — energy cap = 10 like Clash Royale's elixir.)
+const ENERGY_MAX := 10
+
 ## Plus-shape AOE pattern for Cannon (centered on target square).
 const CANNON_PLUS_OFFSETS: Array[Vector2i] = [
 	Vector2i(0, 0),
@@ -113,6 +118,12 @@ static func new_game(config: GameConfig) -> GameState:
 	for color in 2:
 		s.cannon_state.append(_make_runtime(config.cannon))
 		s.lightning_state.append(_make_runtime(config.lightning))
+
+	## Energy pool. Each player gains 1 at the start of their own turn.
+	## White is to move on turn 1, so it has already received that turn's
+	## energy at game start; Black gets theirs after White's first move
+	## flips the side (which runs the turn-start tick — see apply_move).
+	s.energy = [1, 0]
 
 	return s
 
@@ -491,10 +502,13 @@ static func apply_move(state: GameState, m: Dictionary) -> Dictionary:
 	## Flip side.
 	next.side = opposite(state.side)
 
-	## TURN-START TICK on new side. Order: cannons → effects → recharge.
+	## TURN-START TICK on new side. Order: cannons → effects → recharge → energy.
+	## Energy ticks last so the freshly-gained drop is visible in the same
+	## turn the player can spend it.
 	_resolve_pending_cannons(next, events)
 	_tick_status_effects(next, events)
 	_tick_ability_recharge(next)
+	_tick_energy_gain(next)
 
 	next.special_used_this_turn = false
 
@@ -573,9 +587,10 @@ static func _maybe_apply_on_hit_effect(state: GameState, victim_sq: int,
 
 # =============================================================================
 # TURN-START TICKS — run on side-to-move at start of their turn.
-# Order: pending cannons → burn → freeze decrement → ability recharge.
+# Order: pending cannons → burn → freeze decrement → ability recharge → energy.
 # (See IMPL-GODOT §17 "charge tick ordering" for why each step is in this
-# order.)
+# order. Energy ticks last — same reason as recharge: the freshly-gained
+# drop is spendable in the very turn the player just earned it.)
 # =============================================================================
 
 static func _resolve_pending_cannons(state: GameState, events: Array) -> void:
@@ -651,6 +666,15 @@ static func _tick_one_runtime(rt: Dictionary, spec: SpecialAbilityDef) -> void:
 	if int(rt["recharge"]) == 0:
 		rt["charges"] += 1
 		rt["recharge"] = spec.cooldown_turns
+
+## Grant 1 energy ("elixir drop") to side-to-move at turn start, capped at
+## ENERGY_MAX. Mirrors Clash Royale's elixir cadence.
+static func _tick_energy_gain(state: GameState) -> void:
+	var c := state.side
+	if c < 0 or c >= state.energy.size(): return
+	var v: int = int(state.energy[c]) + 1
+	if v > ENERGY_MAX: v = ENERGY_MAX
+	state.energy[c] = v
 
 # =============================================================================
 # legal_moves — HP-aware self-check filter.
@@ -788,6 +812,7 @@ static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 	var spec := _spec_for(state, ability_kind)
 	if rt.is_empty() or spec == null or spec.kind == SpecialAbilityDef.Kind.NONE: return []
 	if int(rt["charges"]) <= 0: return []
+	if _energy_for(state, color) < spec.energy_cost: return []
 
 	var out: Array = []
 	if ability_kind == SpecialAbilityDef.Kind.CANNON:
@@ -795,7 +820,9 @@ static func list_ability_targets(state: GameState, ability_kind: int) -> Array:
 		var forbidden: Dictionary = state.initial_squares_by_color[enemy]
 		for target in 64:
 			var plus := cannon_plus_squares(target)
-			if plus.is_empty(): continue
+			## plus is the on-board subset of the plus — for edge/corner targets
+			## the off-board arms are clipped. The forbidden-zone check still
+			## applies to whatever survives clipping.
 			var ok := true
 			for s in plus:
 				if forbidden.has(s):
@@ -828,17 +855,22 @@ static func _spec_for(state: GameState, kind: int) -> SpecialAbilityDef:
 	if kind == SpecialAbilityDef.Kind.LIGHTNING: return state.config.lightning
 	return null
 
+static func _energy_for(state: GameState, color: int) -> int:
+	if color < 0 or color >= state.energy.size(): return 0
+	return int(state.energy[color])
+
 static func cannon_plus_squares(center_sq: int) -> Array[int]:
 	var out: Array[int] = []
 	var f := file_of(center_sq)
 	var r := rank_of(center_sq)
+	## The center square must itself be on the board, but plus-arms that fall
+	## off-board are simply clipped — a cannon aimed near the edge is allowed
+	## and damages whichever subset of the plus actually lands.
+	if not in_bounds(f, r): return out
 	for off in CANNON_PLUS_OFFSETS:
 		var nf := f + off.x
 		var nr := r + off.y
-		if not in_bounds(nf, nr):
-			## Entire plus must fit on the board — bail with an empty list.
-			var empty: Array[int] = []
-			return empty
+		if not in_bounds(nf, nr): continue
 		out.append(sq_of(nf, nr))
 	return out
 
@@ -855,11 +887,13 @@ static func validate_ability(state: GameState, action: Dictionary) -> String:
 	if rt.is_empty() or spec == null: return "unknown ability"
 	if spec.kind == SpecialAbilityDef.Kind.NONE: return "ability not configured"
 	if int(rt["charges"]) <= 0:                  return "no charges"
+	if _energy_for(state, color) < spec.energy_cost:
+		return "not enough energy (need %d)" % spec.energy_cost
 
 	var target_sq: int = int(action["target_sq"])
 	if kind == SpecialAbilityDef.Kind.CANNON:
 		var plus := cannon_plus_squares(target_sq)
-		if plus.is_empty():                      return "plus area off-board"
+		if plus.is_empty():                      return "target square off-board"
 		var enemy := opposite(color)
 		var forbidden: Dictionary = state.initial_squares_by_color[enemy]
 		for s in plus:
@@ -888,6 +922,8 @@ static func apply_ability(state: GameState, action: Dictionary) -> Dictionary:
 	var spec := _spec_for(next, kind)
 	rt["charges"] -= 1
 	rt["recharge"] = spec.cooldown_turns
+	## Drain energy. validate_ability already guaranteed sufficient stock.
+	next.energy[color] = max(0, int(next.energy[color]) - spec.energy_cost)
 
 	if kind == SpecialAbilityDef.Kind.CANNON:
 		## Queue the attack — does not damage anything immediately.
