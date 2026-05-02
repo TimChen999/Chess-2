@@ -46,22 +46,40 @@ var selected := -1
 var legal_for_selected: Array = []
 var ability_ctx: Dictionary = {}     ## { kind, targets } — set when ability armed
 var pending_promo: Array = []
+var pending_promo_sq: int = -1       ## square the picker is anchored to
 var hover_target_sq := -1
+## UI-side ledger of captured pieces (tracked by diffing old_state vs new
+## state across apply_move). Each entry: { def_id, color }. Used to render
+## the captured-pieces tray in the left rail without engine changes.
+var captured_by_white: Array = []
+var captured_by_black: Array = []
+## UI-side move log. Each entry: { side, from_sq, to_sq, def_id, capture,
+## promo, check }. Used to render algebraic move history in the left rail.
+var move_log: Array = []
 
 # ---------- UI refs ----------
-var status_label: Label
+var top_status_label: Label          ## "White to move." in the top utility bar
 var board_grid: GridContainer
 var anim_overlay: Control            ## above board_grid; hosts floating sprites
 var squares: Array = []              ## [Button * 64]
-var black_panel: Control             ## top — Black's energy bar + ability icons
-var white_panel: Control             ## bottom — White's energy bar + ability icons
-var black_energy_bar: HBoxContainer
-var white_energy_bar: HBoxContainer
-var black_ability_panel: HBoxContainer
-var white_ability_panel: HBoxContainer
+var board_holder: Control            ## sized to the 8x8 grid (used for anchoring promo)
+var board_dim: ColorRect             ## fades the board during pending_promo
+var black_player_panel: Control      ## right rail — Black's energy + ability
+var white_player_panel: Control      ## right rail — White's energy + ability
+var black_energy_bar: VBoxContainer  ## vertical, fills upward
+var white_energy_bar: VBoxContainer
+var black_energy_count_label: Label
+var white_energy_count_label: Label
+var black_ability_holder: Control    ## one ability card per side (cannon OR lightning)
+var white_ability_holder: Control
 var end_label: Label
 var promo_panel: PanelContainer
-var promo_buttons: HBoxContainer
+var promo_buttons: VBoxContainer     ## vertical column of 4 piece buttons
+## Left rail elements
+var captured_white_box: HBoxContainer  ## white pieces captured by black
+var captured_black_box: HBoxContainer  ## black pieces captured by white
+var move_history_list: VBoxContainer
+var move_history_scroll: ScrollContainer
 
 # ---------- animation timing ----------
 const ANIM_MOVE_DURATION   := 0.26
@@ -97,871 +115,1280 @@ var _pulsing_selected_sprite: TextureRect = null
 var _pulsing_ability_icons: Array = []     ## TextureRect on ready ability cards
 
 func _ready() -> void:
-    _build_ui()
-    _new_game()
+	_build_ui()
+	_new_game()
 
 func _process(delta: float) -> void:
-    _pulse_phase += delta
-    _update_pulse_modulates()
+	_pulse_phase += delta
+	_update_pulse_modulates()
 
 ## Apply the current pulse phase to every node tracked in the _pulsing_*
 ## arrays. _render is responsible for membership; this function only scales
 ## the visuals, and is cheap enough to run every frame.
 func _update_pulse_modulates() -> void:
-    var t_move := sin(_pulse_phase * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
-    var a_move := lerpf(0.65, 1.0, t_move)
-    for n in _pulsing_move_overlays:
-        if is_instance_valid(n): n.modulate.a = a_move
+	var t_move := sin(_pulse_phase * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
+	var a_move := lerpf(0.65, 1.0, t_move)
+	for n in _pulsing_move_overlays:
+		if is_instance_valid(n): n.modulate.a = a_move
 
-    var t_tg := sin(_pulse_phase * TAU / PULSE_PERIOD_TELEGRAPH) * 0.5 + 0.5
-    var a_tg := lerpf(0.55, 1.0, t_tg)
-    for n in _pulsing_telegraphs:
-        if is_instance_valid(n): n.modulate.a = a_tg
+	var t_tg := sin(_pulse_phase * TAU / PULSE_PERIOD_TELEGRAPH) * 0.5 + 0.5
+	var a_tg := lerpf(0.55, 1.0, t_tg)
+	for n in _pulsing_telegraphs:
+		if is_instance_valid(n): n.modulate.a = a_tg
 
-    var t_tp := sin((_pulse_phase + 0.25) * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
-    var a_tp := lerpf(0.55, 1.0, t_tp)
-    for n in _pulsing_target_previews:
-        if is_instance_valid(n): n.modulate.a = a_tp
+	var t_tp := sin((_pulse_phase + 0.25) * TAU / PULSE_PERIOD_MOVE) * 0.5 + 0.5
+	var a_tp := lerpf(0.55, 1.0, t_tp)
+	for n in _pulsing_target_previews:
+		if is_instance_valid(n): n.modulate.a = a_tp
 
-    if is_instance_valid(_pulsing_selected_sprite):
-        var t_sel := sin(_pulse_phase * TAU / PULSE_PERIOD_SELECTED) * 0.5 + 0.5
-        var s := lerpf(1.00, 1.06, t_sel)
-        _pulsing_selected_sprite.scale = Vector2(s, s)
+	if is_instance_valid(_pulsing_selected_sprite):
+		var t_sel := sin(_pulse_phase * TAU / PULSE_PERIOD_SELECTED) * 0.5 + 0.5
+		var s := lerpf(1.00, 1.06, t_sel)
+		_pulsing_selected_sprite.scale = Vector2(s, s)
 
-    var t_rd := sin(_pulse_phase * TAU / PULSE_PERIOD_READY) * 0.5 + 0.5
-    var ready_color := Color(1.0, lerpf(0.92, 1.10, t_rd),
-                             lerpf(0.85, 1.00, t_rd), 1.0)
-    for n in _pulsing_ability_icons:
-        if is_instance_valid(n): n.modulate = ready_color
+	var t_rd := sin(_pulse_phase * TAU / PULSE_PERIOD_READY) * 0.5 + 0.5
+	var ready_color := Color(1.0, lerpf(0.92, 1.10, t_rd),
+							 lerpf(0.85, 1.00, t_rd), 1.0)
+	for n in _pulsing_ability_icons:
+		if is_instance_valid(n): n.modulate = ready_color
 
 func _clear_pulse_lists() -> void:
-    ## Clear membership; _process will simply find empty arrays next tick.
-    ## Also restore any nodes that were having modulate/scale driven by
-    ## pulses, so a no-pulse render returns them to their static defaults.
-    for n in _pulsing_move_overlays:
-        if is_instance_valid(n): n.modulate.a = 1.0
-    for n in _pulsing_telegraphs:
-        if is_instance_valid(n): n.modulate.a = 1.0
-    for n in _pulsing_target_previews:
-        if is_instance_valid(n): n.modulate.a = 1.0
-    for n in _pulsing_ability_icons:
-        if is_instance_valid(n): n.modulate = Color.WHITE
-    if is_instance_valid(_pulsing_selected_sprite):
-        _pulsing_selected_sprite.scale = Vector2.ONE
-    _pulsing_move_overlays.clear()
-    _pulsing_telegraphs.clear()
-    _pulsing_target_previews.clear()
-    _pulsing_ability_icons.clear()
-    _pulsing_selected_sprite = null
+	## Clear membership; _process will simply find empty arrays next tick.
+	## Also restore any nodes that were having modulate/scale driven by
+	## pulses, so a no-pulse render returns them to their static defaults.
+	for n in _pulsing_move_overlays:
+		if is_instance_valid(n): n.modulate.a = 1.0
+	for n in _pulsing_telegraphs:
+		if is_instance_valid(n): n.modulate.a = 1.0
+	for n in _pulsing_target_previews:
+		if is_instance_valid(n): n.modulate.a = 1.0
+	for n in _pulsing_ability_icons:
+		if is_instance_valid(n): n.modulate = Color.WHITE
+	if is_instance_valid(_pulsing_selected_sprite):
+		_pulsing_selected_sprite.scale = Vector2.ONE
+	_pulsing_move_overlays.clear()
+	_pulsing_telegraphs.clear()
+	_pulsing_target_previews.clear()
+	_pulsing_ability_icons.clear()
+	_pulsing_selected_sprite = null
 
 func _new_game() -> void:
-    state = Rules.new_game(GameSettings.active_config)
-    last_status = Rules.game_status(state)
-    mode = "select_piece"
-    selected = -1
-    legal_for_selected = []
-    ability_ctx = {}
-    pending_promo = []
-    hover_target_sq = -1
-    _render()
+	state = Rules.new_game(GameSettings.active_config)
+	last_status = Rules.game_status(state)
+	mode = "select_piece"
+	selected = -1
+	legal_for_selected = []
+	ability_ctx = {}
+	pending_promo = []
+	pending_promo_sq = -1
+	hover_target_sq = -1
+	captured_by_white.clear()
+	captured_by_black.clear()
+	move_log.clear()
+	if board_dim != null: board_dim.visible = false
+	if promo_panel != null: promo_panel.visible = false
+	_render()
 
 # ============================================================================
 # UI CONSTRUCTION
 # ============================================================================
 
-## Layout: a CenterContainer holding an HBox with [left spacer | board column
-## | right control column]. Putting controls in the right margin instead of
-## across the top keeps the board + energy strips tight enough to fit a
-## 720px viewport, and the symmetric left spacer keeps the board horizontally
-## centered on screen.
-const SIDE_W := 200
+## Layout (post-redesign):
+##
+##   ┌─ top utility bar (full width) ──────────────────────────────────┐
+##   │  status text                              ← Menu    New game    │
+##   ├─ left rail (224) ─┬─ board ─┬─ right rail (224) ─────────────┐
+##   │  captured pieces  │  8x8    │  Black player panel             │
+##   │  move history     │  board  │  White player panel             │
+##   └───────────────────┴─────────┴─────────────────────────────────┘
+##
+## The previous layout put the energy bars in horizontal strips above and
+## below the board and crammed all chrome (title, status, menu) into a
+## 200px right control rail. The new layout reclaims both rails for
+## gameplay info and pushes chrome into a slim top utility bar.
+const SIDE_W := 224
+const TOP_BAR_H := 44
 
 func _build_ui() -> void:
-    var center := CenterContainer.new()
-    center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    add_child(center)
+	## Root layout — VBoxContainer with [top utility bar | main row].
+	var root := VBoxContainer.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.add_theme_constant_override("separation", 0)
+	add_child(root)
 
-    var row := HBoxContainer.new()
-    row.add_theme_constant_override("separation", 20)
-    center.add_child(row)
+	var top_bar := _build_top_bar()
+	root.add_child(top_bar)
 
-    ## Symmetric left spacer keeps the board visually centered on screen.
-    var left_spacer := Control.new()
-    left_spacer.custom_minimum_size = Vector2(SIDE_W, 0)
-    row.add_child(left_spacer)
+	## Main row — center-aligned so the board sits in the middle even when
+	## the viewport is wider than left + center + right combined.
+	var main_center := CenterContainer.new()
+	main_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	root.add_child(main_center)
 
-    # --- Board column ---
-    var board_col := VBoxContainer.new()
-    board_col.add_theme_constant_override("separation", 4)
-    board_col.alignment = BoxContainer.ALIGNMENT_CENTER
-    row.add_child(board_col)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	main_center.add_child(row)
 
-    black_panel = _build_side_panel(Rules.BLACK)
-    board_col.add_child(black_panel)
+	# --- Left rail (captured pieces + move history) ---
+	var left_rail := _build_left_rail()
+	row.add_child(left_rail)
 
-    var board_container := CenterContainer.new()
-    board_col.add_child(board_container)
+	# --- Board column ---
+	var board_col := VBoxContainer.new()
+	board_col.add_theme_constant_override("separation", 4)
+	board_col.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_child(board_col)
 
-    ## board_holder is a Control sized exactly to the 8x8 grid. Two children
-    ## both anchored to fill: the GridContainer with the static board, and a
-    ## transparent overlay that hosts floating animation sprites above the
-    ## board. anim_overlay ignores mouse so clicks still hit the squares.
-    var board_holder := Control.new()
-    board_holder.custom_minimum_size = Vector2(SQ_SIZE * 8, SQ_SIZE * 8)
-    board_container.add_child(board_holder)
+	var board_container := CenterContainer.new()
+	board_col.add_child(board_container)
 
-    ## Pixel-art bordered frame around the board for a "tabletop" feel.
-    var frame := ColorRect.new()
-    frame.color = Color(0.18, 0.13, 0.12)
-    frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    frame.offset_left = -6; frame.offset_top = -6
-    frame.offset_right = 6; frame.offset_bottom = 6
-    frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    board_holder.add_child(frame)
-    var inner := ColorRect.new()
-    inner.color = Color(0.32, 0.22, 0.18)
-    inner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    inner.offset_left = -3; inner.offset_top = -3
-    inner.offset_right = 3; inner.offset_bottom = 3
-    inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    board_holder.add_child(inner)
+	## board_holder is a Control sized exactly to the 8x8 grid. Children
+	## are: pixel-art frame, GridContainer for static squares, anim_overlay
+	## for floating animation sprites, and a board_dim ColorRect that fades
+	## the board during promotion.
+	board_holder = Control.new()
+	board_holder.custom_minimum_size = Vector2(SQ_SIZE * 8, SQ_SIZE * 8)
+	board_container.add_child(board_holder)
 
-    board_grid = GridContainer.new()
-    board_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    board_grid.columns = 8
-    board_grid.add_theme_constant_override("h_separation", 0)
-    board_grid.add_theme_constant_override("v_separation", 0)
-    board_holder.add_child(board_grid)
+	## Pixel-art bordered frame around the board for a "tabletop" feel.
+	var frame := ColorRect.new()
+	frame.color = Color(0.18, 0.13, 0.12)
+	frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	frame.offset_left = -6; frame.offset_top = -6
+	frame.offset_right = 6; frame.offset_bottom = 6
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	board_holder.add_child(frame)
+	var inner := ColorRect.new()
+	inner.color = Color(0.32, 0.22, 0.18)
+	inner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	inner.offset_left = -3; inner.offset_top = -3
+	inner.offset_right = 3; inner.offset_bottom = 3
+	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	board_holder.add_child(inner)
 
-    anim_overlay = Control.new()
-    anim_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    anim_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    board_holder.add_child(anim_overlay)
+	board_grid = GridContainer.new()
+	board_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	board_grid.columns = 8
+	board_grid.add_theme_constant_override("h_separation", 0)
+	board_grid.add_theme_constant_override("v_separation", 0)
+	board_holder.add_child(board_grid)
 
-    squares.resize(64)
-    ## Render rank 7 at top so White sits at the bottom on screen.
-    for r in range(7, -1, -1):
-        for f in 8:
-            var sq := r * 8 + f
-            var btn := _make_square(sq)
-            board_grid.add_child(btn)
-            squares[sq] = btn
+	anim_overlay = Control.new()
+	anim_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	anim_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	board_holder.add_child(anim_overlay)
 
-    white_panel = _build_side_panel(Rules.WHITE)
-    board_col.add_child(white_panel)
+	## Board-wide dim during pending_promo. Sits above the squares but
+	## below the promotion picker (which is parented to the root).
+	board_dim = ColorRect.new()
+	board_dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	board_dim.color = Color(0, 0, 0, 0.50)
+	## STOP so clicks during pending_promo don't fall through to squares.
+	## (The square click handler also guards against pending_promo, so this
+	## is belt-and-braces, but it also makes the cursor not show pointer
+	## hover over squares while the picker is up.)
+	board_dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	board_dim.visible = false
+	board_holder.add_child(board_dim)
 
-    # --- Right control column ---
-    var ctrl := VBoxContainer.new()
-    ctrl.custom_minimum_size = Vector2(SIDE_W, 0)
-    ctrl.size_flags_vertical = Control.SIZE_FILL
-    ctrl.add_theme_constant_override("separation", 12)
-    row.add_child(ctrl)
+	squares.resize(64)
+	## Render rank 7 at top so White sits at the bottom on screen.
+	for r in range(7, -1, -1):
+		for f in 8:
+			var sq := r * 8 + f
+			var btn := _make_square(sq)
+			board_grid.add_child(btn)
+			squares[sq] = btn
 
-    var title := Label.new()
-    title.text = "CHESS²"
-    title.add_theme_font_size_override("font_size", 32)
-    title.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
-    title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    title.add_theme_constant_override("outline_size", 4)
-    title.add_theme_color_override("font_outline_color", Color(0.06, 0.04, 0.07))
-    ctrl.add_child(title)
+	end_label = Label.new()
+	end_label.add_theme_font_size_override("font_size", 18)
+	end_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	end_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	end_label.modulate = Color(1, 0.95, 0.8)
+	end_label.visible = false
+	board_col.add_child(end_label)
 
-    var btn_back := _make_styled_button("← Menu")
-    btn_back.pressed.connect(func(): back_to_menu.emit())
-    ctrl.add_child(btn_back)
+	# --- Right rail (player panels — Black on top, White on bottom) ---
+	var right_rail := VBoxContainer.new()
+	right_rail.custom_minimum_size = Vector2(SIDE_W, 0)
+	right_rail.size_flags_vertical = Control.SIZE_FILL
+	right_rail.add_theme_constant_override("separation", 12)
+	row.add_child(right_rail)
 
-    ## Status — the marquee text. Big, centered, lives in the right column.
-    status_label = Label.new()
-    status_label.text = ""
-    status_label.add_theme_font_size_override("font_size", 18)
-    status_label.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
-    status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-    status_label.custom_minimum_size = Vector2(SIDE_W - 8, 0)
-    ctrl.add_child(status_label)
+	black_player_panel = _build_player_panel(Rules.BLACK)
+	right_rail.add_child(black_player_panel)
 
-    end_label = Label.new()
-    end_label.add_theme_font_size_override("font_size", 16)
-    end_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    end_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-    end_label.modulate = Color(1, 0.95, 0.8)
-    end_label.visible = false
-    ctrl.add_child(end_label)
+	white_player_panel = _build_player_panel(Rules.WHITE)
+	right_rail.add_child(white_player_panel)
 
-    promo_panel = PanelContainer.new()
-    promo_panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-    promo_panel.visible = false
-    var promo_sb := StyleBoxFlat.new()
-    promo_sb.bg_color = Color(0.10, 0.08, 0.10)
-    promo_sb.border_color = Color(0.95, 0.88, 0.74)
-    promo_sb.set_border_width_all(2)
-    promo_sb.set_corner_radius_all(0)
-    promo_sb.set_content_margin_all(6)
-    promo_panel.add_theme_stylebox_override("panel", promo_sb)
-    ctrl.add_child(promo_panel)
+	var rail_spacer := Control.new()
+	rail_spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right_rail.add_child(rail_spacer)
 
-    promo_buttons = HBoxContainer.new()
-    promo_buttons.add_theme_constant_override("separation", 4)
-    promo_panel.add_child(promo_buttons)
+	# --- Promo picker — parented to root so it can be positioned in
+	# screen space anchored to the promoting square. Vertical column of
+	# 4 piece sprites; visibility driven by pending_promo.
+	promo_panel = PanelContainer.new()
+	promo_panel.visible = false
+	promo_panel.z_index = 50    ## above board_dim; above the rest of the UI
+	var promo_sb := StyleBoxFlat.new()
+	promo_sb.bg_color = Color(0.10, 0.08, 0.10)
+	promo_sb.border_color = Color(0.95, 0.88, 0.74)
+	promo_sb.set_border_width_all(2)
+	promo_sb.set_corner_radius_all(0)
+	promo_sb.set_content_margin_all(4)
+	promo_panel.add_theme_stylebox_override("panel", promo_sb)
+	add_child(promo_panel)
 
-    var spacer := Control.new()
-    spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-    ctrl.add_child(spacer)
+	promo_buttons = VBoxContainer.new()
+	promo_buttons.add_theme_constant_override("separation", 4)
+	promo_panel.add_child(promo_buttons)
 
-    var btn_new := _make_styled_button("New game")
-    btn_new.pressed.connect(_new_game)
-    ctrl.add_child(btn_new)
+## Top utility bar — slim, full-width row above the board. Contains the
+## status text (most important runtime state) and chrome buttons (Menu,
+## New game). Replaces the old in-game CHESS² title + side-rail layout.
+func _build_top_bar() -> Control:
+	var bar := PanelContainer.new()
+	bar.custom_minimum_size = Vector2(0, TOP_BAR_H)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.08, 0.06, 0.08)
+	sb.border_color = Color(0.18, 0.13, 0.12)
+	sb.border_width_bottom = 2
+	sb.content_margin_left = 12
+	sb.content_margin_top = 4
+	sb.content_margin_right = 12
+	sb.content_margin_bottom = 4
+	bar.add_theme_stylebox_override("panel", sb)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	bar.add_child(row)
+
+	top_status_label = Label.new()
+	top_status_label.text = ""
+	top_status_label.add_theme_font_size_override("font_size", 18)
+	top_status_label.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+	top_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	top_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	row.add_child(top_status_label)
+
+	var btn_back := _make_compact_button("← Menu")
+	btn_back.pressed.connect(func(): back_to_menu.emit())
+	row.add_child(btn_back)
+
+	var btn_new := _make_compact_button("New game")
+	btn_new.pressed.connect(_new_game)
+	row.add_child(btn_new)
+
+	return bar
+
+## Left rail — captured pieces tray (split white/black) plus algebraic
+## move history. Both populated by _render via the captured_by_* arrays
+## and move_log array (tracked in _play_move by diffing old/new state).
+func _build_left_rail() -> Control:
+	var rail := VBoxContainer.new()
+	rail.custom_minimum_size = Vector2(SIDE_W, 0)
+	rail.size_flags_vertical = Control.SIZE_FILL
+	rail.add_theme_constant_override("separation", 8)
+
+	## Captured tray — Black's captures of White on top, then White's
+	## captures of Black. Each tray is a small panel with a label header
+	## and a flow of mini piece icons.
+	var cap_panel := _make_section_panel("CAPTURED")
+	rail.add_child(cap_panel)
+	var cap_inner: VBoxContainer = cap_panel.get_node("Inner")
+
+	captured_white_box = HBoxContainer.new()
+	captured_white_box.add_theme_constant_override("separation", 2)
+	captured_white_box.custom_minimum_size = Vector2(0, 28)
+	cap_inner.add_child(captured_white_box)
+
+	var cap_sep := HSeparator.new()
+	cap_sep.modulate = Color(1, 1, 1, 0.15)
+	cap_inner.add_child(cap_sep)
+
+	captured_black_box = HBoxContainer.new()
+	captured_black_box.add_theme_constant_override("separation", 2)
+	captured_black_box.custom_minimum_size = Vector2(0, 28)
+	cap_inner.add_child(captured_black_box)
+
+	## Move history — scrollable list of moves; latest at the bottom.
+	var hist_panel := _make_section_panel("MOVES")
+	hist_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	rail.add_child(hist_panel)
+	var hist_inner: VBoxContainer = hist_panel.get_node("Inner")
+
+	move_history_scroll = ScrollContainer.new()
+	move_history_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	move_history_scroll.custom_minimum_size = Vector2(0, 120)
+	hist_inner.add_child(move_history_scroll)
+
+	move_history_list = VBoxContainer.new()
+	move_history_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	move_history_list.add_theme_constant_override("separation", 0)
+	move_history_scroll.add_child(move_history_list)
+
+	return rail
+
+## Section panel — dark wood card with a small uppercase header label
+## and a child container called "Inner" for the section contents.
+func _make_section_panel(header_text: String) -> PanelContainer:
+	var p := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.08, 0.10)
+	sb.border_color = Color(0.18, 0.13, 0.12)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(0)
+	sb.content_margin_left = 8
+	sb.content_margin_top = 6
+	sb.content_margin_right = 8
+	sb.content_margin_bottom = 6
+	p.add_theme_stylebox_override("panel", sb)
+
+	var inner := VBoxContainer.new()
+	inner.name = "Inner"
+	inner.add_theme_constant_override("separation", 4)
+	p.add_child(inner)
+
+	var hdr := Label.new()
+	hdr.text = header_text
+	hdr.add_theme_font_size_override("font_size", 11)
+	hdr.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+	hdr.modulate = Color(1, 1, 1, 0.55)
+	inner.add_child(hdr)
+	return p
+
+## Compact pixel-styled button — same palette as _make_styled_button but
+## smaller, for the top utility bar where chrome lives.
+func _make_compact_button(text: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.focus_mode = Control.FOCUS_NONE
+	b.custom_minimum_size = Vector2(0, 28)
+
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.18, 0.13, 0.12)
+	normal.border_color = Color(0.06, 0.04, 0.07)
+	normal.set_border_width_all(2)
+	normal.set_corner_radius_all(0)
+	normal.content_margin_left = 10
+	normal.content_margin_top = 4
+	normal.content_margin_right = 10
+	normal.content_margin_bottom = 4
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.28, 0.20, 0.18)
+	hover.border_color = Color(0.95, 0.88, 0.74)
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = Color(0.10, 0.08, 0.07)
+	pressed.border_color = Color(0.95, 0.88, 0.74)
+
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", pressed)
+	b.add_theme_stylebox_override("focus", normal)
+	b.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+	b.add_theme_color_override("font_hover_color", Color(1.00, 0.97, 0.86))
+	b.add_theme_color_override("font_pressed_color", Color(1.00, 0.97, 0.86))
+	b.add_theme_font_size_override("font_size", 14)
+	return b
 
 ## Pixel-styled button — flat dark wood with a hard 2px outline that turns
 ## cream-yellow on hover, matching the board frame palette.
 func _make_styled_button(text: String) -> Button:
-    var b := Button.new()
-    b.text = text
-    b.focus_mode = Control.FOCUS_NONE
-    b.custom_minimum_size = Vector2(0, 36)
+	var b := Button.new()
+	b.text = text
+	b.focus_mode = Control.FOCUS_NONE
+	b.custom_minimum_size = Vector2(0, 36)
 
-    var normal := StyleBoxFlat.new()
-    normal.bg_color = Color(0.18, 0.13, 0.12)
-    normal.border_color = Color(0.06, 0.04, 0.07)
-    normal.set_border_width_all(2)
-    normal.set_corner_radius_all(0)
-    normal.set_content_margin_all(8)
-    var hover := normal.duplicate() as StyleBoxFlat
-    hover.bg_color = Color(0.28, 0.20, 0.18)
-    hover.border_color = Color(0.95, 0.88, 0.74)
-    var pressed := normal.duplicate() as StyleBoxFlat
-    pressed.bg_color = Color(0.10, 0.08, 0.07)
-    pressed.border_color = Color(0.95, 0.88, 0.74)
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.18, 0.13, 0.12)
+	normal.border_color = Color(0.06, 0.04, 0.07)
+	normal.set_border_width_all(2)
+	normal.set_corner_radius_all(0)
+	normal.set_content_margin_all(8)
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.28, 0.20, 0.18)
+	hover.border_color = Color(0.95, 0.88, 0.74)
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = Color(0.10, 0.08, 0.07)
+	pressed.border_color = Color(0.95, 0.88, 0.74)
 
-    b.add_theme_stylebox_override("normal", normal)
-    b.add_theme_stylebox_override("hover", hover)
-    b.add_theme_stylebox_override("pressed", pressed)
-    b.add_theme_stylebox_override("focus", normal)
-    b.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
-    b.add_theme_color_override("font_hover_color", Color(1.00, 0.97, 0.86))
-    b.add_theme_color_override("font_pressed_color", Color(1.00, 0.97, 0.86))
-    b.add_theme_font_size_override("font_size", 16)
-    return b
+	b.add_theme_stylebox_override("normal", normal)
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", pressed)
+	b.add_theme_stylebox_override("focus", normal)
+	b.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+	b.add_theme_color_override("font_hover_color", Color(1.00, 0.97, 0.86))
+	b.add_theme_color_override("font_pressed_color", Color(1.00, 0.97, 0.86))
+	b.add_theme_font_size_override("font_size", 16)
+	return b
 
-## Build a per-side resources strip — energy bar on the inside (closer to
-## board) and ability icons on the outer side. The Black panel sits above
-## the board (mirrored), the White panel below.
-func _build_side_panel(color: int) -> Control:
-    var panel := HBoxContainer.new()
-    panel.custom_minimum_size = Vector2(SQ_SIZE * 8 + 12, 40)
-    panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-    panel.add_theme_constant_override("separation", 10)
-    panel.alignment = BoxContainer.ALIGNMENT_BEGIN
+## Build a per-player vertical panel for the right rail — name header at
+## the top, vertical energy bar in the middle, ability card at the bottom.
+## Active side gets a soft glow; inactive side desaturates ~30%.
+func _build_player_panel(color: int) -> Control:
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(SIDE_W, 0)
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.08, 0.10)
+	sb.border_color = Color(0.18, 0.13, 0.12)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(0)
+	sb.set_content_margin_all(10)
+	panel.add_theme_stylebox_override("panel", sb)
+	panel.set_meta("color", color)
 
-    ## Tag — small label identifying which side this strip is for.
-    var tag := Label.new()
-    tag.text = "BLACK" if color == Rules.BLACK else "WHITE"
-    tag.add_theme_font_size_override("font_size", 11)
-    tag.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
-    tag.modulate = Color(1, 1, 1, 0.7)
-    tag.custom_minimum_size = Vector2(48, 0)
-    tag.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    panel.add_child(tag)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	panel.add_child(col)
 
-    ## Energy bar — 10 segments laid out horizontally.
-    var bar := HBoxContainer.new()
-    bar.add_theme_constant_override("separation", 2)
-    for i in 10:
-        var seg := TextureRect.new()
-        seg.texture = SpriteFactory.energy_segment_texture(false)
-        seg.custom_minimum_size = Vector2(14, 32)
-        seg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-        seg.stretch_mode = TextureRect.STRETCH_SCALE
-        seg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-        seg.set_meta("idx", i)
-        bar.add_child(seg)
-    panel.add_child(bar)
+	## Header — "Black" / "White" plus an inline ⚡N readout. One source of
+	## truth: the bar visualizes the same number, the header reads it.
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 6)
+	col.add_child(header)
 
-    ## Numeric energy readout (e.g. "3")
-    var num := Label.new()
-    num.text = "0"
-    num.add_theme_font_size_override("font_size", 16)
-    num.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
-    num.custom_minimum_size = Vector2(28, 0)
-    num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    num.set_meta("role", "energy_count")
-    panel.add_child(num)
+	var name_lbl := Label.new()
+	name_lbl.text = "Black" if color == Rules.BLACK else "White"
+	name_lbl.add_theme_font_size_override("font_size", 14)
+	name_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(name_lbl)
 
-    ## Ability icons — populated in _render_side_panel.
-    var icons := HBoxContainer.new()
-    icons.add_theme_constant_override("separation", 8)
-    icons.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-    icons.alignment = BoxContainer.ALIGNMENT_END
-    panel.add_child(icons)
+	var num := Label.new()
+	num.text = "0"
+	num.add_theme_font_size_override("font_size", 16)
+	num.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
+	num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	num.set_meta("role", "energy_count")
+	header.add_child(num)
 
-    if color == Rules.BLACK:
-        black_energy_bar = bar
-        black_ability_panel = icons
-    else:
-        white_energy_bar = bar
-        white_ability_panel = icons
-    return panel
+	var bolt := Label.new()
+	bolt.text = "⚡"
+	bolt.add_theme_font_size_override("font_size", 14)
+	bolt.add_theme_color_override("font_color", Color(0.62, 0.92, 1.0))
+	bolt.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	header.add_child(bolt)
+
+	## Resource row — vertical energy bar on the left, ability card on
+	## the right. Stretches to fill panel width.
+	var resource_row := HBoxContainer.new()
+	resource_row.add_theme_constant_override("separation", 12)
+	col.add_child(resource_row)
+
+	## Energy bar — vertical column of 10 segments. We add segments
+	## bottom-up (highest index at top) so visually the bar fills upward
+	## from the bottom (Clash Royale / Hearthstone convention).
+	var bar := VBoxContainer.new()
+	bar.add_theme_constant_override("separation", 2)
+	bar.custom_minimum_size = Vector2(20, 0)
+	for visual_pos in 10:
+		## visual_pos 0 = top, 9 = bottom. We want segment idx 9 at top
+		## (depletes last) and idx 0 at bottom (fills first).
+		var seg := TextureRect.new()
+		seg.texture = SpriteFactory.energy_segment_texture(false)
+		seg.custom_minimum_size = Vector2(20, 10)
+		seg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		seg.stretch_mode = TextureRect.STRETCH_SCALE
+		seg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		seg.set_meta("idx", 9 - visual_pos)
+		bar.add_child(seg)
+	resource_row.add_child(bar)
+
+	## Ability card holder — a single Control we re-populate in
+	## _render_player_panel, since the active ability and its state
+	## change per render.
+	var ability_holder := Control.new()
+	ability_holder.custom_minimum_size = Vector2(96, 96)
+	ability_holder.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	resource_row.add_child(ability_holder)
+
+	if color == Rules.BLACK:
+		black_energy_bar = bar
+		black_ability_holder = ability_holder
+		black_energy_count_label = num
+	else:
+		white_energy_bar = bar
+		white_ability_holder = ability_holder
+		white_energy_count_label = num
+	return panel
 
 func _make_square(sq: int) -> Button:
-    var btn := Button.new()
-    btn.custom_minimum_size = Vector2(SQ_SIZE, SQ_SIZE)
-    btn.focus_mode = Control.FOCUS_NONE
-    btn.flat = true
-    btn.set_meta("sq", sq)
-    btn.pressed.connect(_on_square_clicked.bind(sq))
-    btn.mouse_entered.connect(_on_square_hover.bind(sq))
-    btn.mouse_exited.connect(_on_square_hover.bind(-1))
+	var btn := Button.new()
+	btn.custom_minimum_size = Vector2(SQ_SIZE, SQ_SIZE)
+	btn.focus_mode = Control.FOCUS_NONE
+	btn.flat = true
+	btn.set_meta("sq", sq)
+	btn.pressed.connect(_on_square_clicked.bind(sq))
+	btn.mouse_entered.connect(_on_square_hover.bind(sq))
+	btn.mouse_exited.connect(_on_square_hover.bind(-1))
 
-    # Background tile (procedural pixel-art texture)
-    var bg := TextureRect.new()
-    bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    bg.stretch_mode = TextureRect.STRETCH_SCALE
-    bg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    bg.name = "BG"
-    btn.add_child(bg)
+	# Background tile (procedural pixel-art texture)
+	var bg := TextureRect.new()
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bg.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	bg.stretch_mode = TextureRect.STRETCH_SCALE
+	bg.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	bg.name = "BG"
+	btn.add_child(bg)
 
-    # Highlight overlay (drawn on top of BG; usually transparent)
-    var hl := ColorRect.new()
-    hl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    hl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    hl.name = "HL"
-    hl.color = Color(0, 0, 0, 0)
-    btn.add_child(hl)
+	# Highlight overlay (drawn on top of BG; usually transparent)
+	var hl := ColorRect.new()
+	hl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	hl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hl.name = "HL"
+	hl.color = Color(0, 0, 0, 0)
+	btn.add_child(hl)
 
-    # Drop shadow under the piece
-    var shadow := TextureRect.new()
-    shadow.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
-    shadow.offset_top = -16
-    shadow.offset_bottom = -2
-    shadow.offset_left = 12
-    shadow.offset_right = -12
-    shadow.texture = SpriteFactory.shadow_texture()
-    shadow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    shadow.stretch_mode = TextureRect.STRETCH_SCALE
-    shadow.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    shadow.visible = false
-    shadow.name = "Shadow"
-    btn.add_child(shadow)
+	# Drop shadow under the piece
+	var shadow := TextureRect.new()
+	shadow.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	shadow.offset_top = -16
+	shadow.offset_bottom = -2
+	shadow.offset_left = 12
+	shadow.offset_right = -12
+	shadow.texture = SpriteFactory.shadow_texture()
+	shadow.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	shadow.stretch_mode = TextureRect.STRETCH_SCALE
+	shadow.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shadow.visible = false
+	shadow.name = "Shadow"
+	btn.add_child(shadow)
 
-    # Piece sprite (centered)
-    var sprite := TextureRect.new()
-    sprite.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    sprite.offset_left = 4; sprite.offset_top = 4
-    sprite.offset_right = -4; sprite.offset_bottom = -4
-    sprite.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    sprite.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-    sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    sprite.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    sprite.name = "Sprite"
-    btn.add_child(sprite)
+	# Piece sprite (centered)
+	var sprite := TextureRect.new()
+	sprite.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	sprite.offset_left = 4; sprite.offset_top = 4
+	sprite.offset_right = -4; sprite.offset_bottom = -4
+	sprite.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	sprite.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	sprite.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	sprite.name = "Sprite"
+	btn.add_child(sprite)
 
-    # HP badge (top-left). Compact "x/y" with a dark plate behind it for
-    # readability against the cream/dark wood tile colors.
-    var hp_plate := ColorRect.new()
-    hp_plate.position = Vector2(2, 2)
-    hp_plate.size = Vector2(28, 14)
-    hp_plate.color = Color(0, 0, 0, 0.55)
-    hp_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    hp_plate.name = "HPPlate"
-    hp_plate.visible = false
-    btn.add_child(hp_plate)
+	# HP badge (top-left). Compact "x/y" with a dark plate behind it for
+	# readability against the cream/dark wood tile colors.
+	var hp_plate := ColorRect.new()
+	hp_plate.position = Vector2(2, 2)
+	hp_plate.size = Vector2(28, 14)
+	hp_plate.color = Color(0, 0, 0, 0.55)
+	hp_plate.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hp_plate.name = "HPPlate"
+	hp_plate.visible = false
+	btn.add_child(hp_plate)
 
-    var hp := Label.new()
-    hp.position = Vector2(4, 1)
-    hp.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    hp.add_theme_font_size_override("font_size", 11)
-    hp.add_theme_color_override("font_color", Color.WHITE)
-    hp.name = "HP"
-    btn.add_child(hp)
+	var hp := Label.new()
+	hp.position = Vector2(4, 1)
+	hp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hp.add_theme_font_size_override("font_size", 11)
+	hp.add_theme_color_override("font_color", Color.WHITE)
+	hp.name = "HP"
+	btn.add_child(hp)
 
-    # FX badges (top-right)
-    var fx := Label.new()
-    fx.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-    fx.offset_left = -28
-    fx.offset_top = 1
-    fx.offset_right = -3
-    fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    fx.add_theme_font_size_override("font_size", 10)
-    fx.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-    fx.name = "FX"
-    btn.add_child(fx)
+	# FX badges (top-right)
+	var fx := Label.new()
+	fx.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	fx.offset_left = -28
+	fx.offset_top = 1
+	fx.offset_right = -3
+	fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	fx.add_theme_font_size_override("font_size", 10)
+	fx.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	fx.name = "FX"
+	btn.add_child(fx)
 
-    return btn
+	## File / rank corner labels — small cream characters in the inner
+	## corner of edge squares. Files (a-h) along bottom rank, ranks (1-8)
+	## along left file. Tinted to match the wood frame so they read as
+	## chrome, not gameplay.
+	var f := sq & 7
+	var r := sq >> 3
+	if r == 0:
+		## Bottom row — file label in bottom-right corner
+		var file_lbl := Label.new()
+		file_lbl.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+		file_lbl.offset_left = -14; file_lbl.offset_top = -16
+		file_lbl.offset_right = -2; file_lbl.offset_bottom = -2
+		file_lbl.text = "abcdefgh"[f]
+		file_lbl.add_theme_font_size_override("font_size", 10)
+		file_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74, 0.85))
+		file_lbl.add_theme_constant_override("outline_size", 2)
+		file_lbl.add_theme_color_override("font_outline_color", Color(0.06, 0.04, 0.07, 0.7))
+		file_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		file_lbl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+		file_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.add_child(file_lbl)
+	if f == 0:
+		## Left column — rank label in top-left corner. Sits adjacent to
+		## (but not overlapping) the HP plate which is at (2,2).
+		var rank_lbl := Label.new()
+		rank_lbl.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+		rank_lbl.offset_left = 2; rank_lbl.offset_top = 18
+		rank_lbl.offset_right = 14; rank_lbl.offset_bottom = 32
+		rank_lbl.text = "%d" % (r + 1)
+		rank_lbl.add_theme_font_size_override("font_size", 10)
+		rank_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74, 0.85))
+		rank_lbl.add_theme_constant_override("outline_size", 2)
+		rank_lbl.add_theme_color_override("font_outline_color", Color(0.06, 0.04, 0.07, 0.7))
+		rank_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.add_child(rank_lbl)
+
+	return btn
 
 # ============================================================================
 # RENDER — pure projection of (state, mode, selected) → DOM.
 # ============================================================================
 
 func _render() -> void:
-    _clear_pulse_lists()
-    var cannon_targets := {}
-    for pa in state.pending_attacks:
-        if pa.kind != SpecialAbilityDef.Kind.CANNON: continue
-        for s in pa.target_squares:
-            cannon_targets[s] = true
+	_clear_pulse_lists()
+	var cannon_targets := {}
+	for pa in state.pending_attacks:
+		if pa.kind != SpecialAbilityDef.Kind.CANNON: continue
+		for s in pa.target_squares:
+			cannon_targets[s] = true
 
-    ## Debris warnings — for each pending hit, find the smallest "pairs
-    ## remaining" so a square covered by overlapping warnings shows the
-    ## most urgent (smallest) countdown. Always >= 1 here since debris
-    ## with triggers_on_fullmove == state.fullmove was already resolved
-    ## inside apply_move's tick before this render runs.
-    var debris_pairs_remaining := {}     ## sq -> int (pairs until impact)
-    for pd in state.pending_debris:
-        var pairs: int = maxi(pd.triggers_on_fullmove - state.fullmove, 1)
-        for s in pd.target_squares:
-            if not debris_pairs_remaining.has(s) or pairs < int(debris_pairs_remaining[s]):
-                debris_pairs_remaining[s] = pairs
+	## Debris warnings — for each pending hit, find the smallest "pairs
+	## remaining" so a square covered by overlapping warnings shows the
+	## most urgent (smallest) countdown. Always >= 1 here since debris
+	## with triggers_on_fullmove == state.fullmove was already resolved
+	## inside apply_move's tick before this render runs.
+	var debris_pairs_remaining := {}     ## sq -> int (pairs until impact)
+	for pd in state.pending_debris:
+		var pairs: int = maxi(pd.triggers_on_fullmove - state.fullmove, 1)
+		for s in pd.target_squares:
+			if not debris_pairs_remaining.has(s) or pairs < int(debris_pairs_remaining[s]):
+				debris_pairs_remaining[s] = pairs
 
-    var hover_plus := {}
-    if mode == "select_ability" and ability_ctx.get("kind") == SpecialAbilityDef.Kind.CANNON \
-       and hover_target_sq >= 0:
-        for t in ability_ctx.get("targets", []):
-            if int(t["sq"]) == hover_target_sq:
-                for s in t.get("plus", []):
-                    hover_plus[s] = true
-                break
+	var hover_plus := {}
+	if mode == "select_ability" and ability_ctx.get("kind") == SpecialAbilityDef.Kind.CANNON \
+	   and hover_target_sq >= 0:
+		for t in ability_ctx.get("targets", []):
+			if int(t["sq"]) == hover_target_sq:
+				for s in t.get("plus", []):
+					hover_plus[s] = true
+				break
 
-    for sq in 64:
-        var btn: Button = squares[sq]
-        var bg: TextureRect = btn.get_node("BG")
-        var hl: ColorRect = btn.get_node("HL")
-        var sprite: TextureRect = btn.get_node("Sprite")
-        var shadow: TextureRect = btn.get_node("Shadow")
-        var hp_plate: ColorRect = btn.get_node("HPPlate")
-        var hp_lbl: Label = btn.get_node("HP")
-        var fx_lbl: Label = btn.get_node("FX")
+	for sq in 64:
+		var btn: Button = squares[sq]
+		var bg: TextureRect = btn.get_node("BG")
+		var hl: ColorRect = btn.get_node("HL")
+		var sprite: TextureRect = btn.get_node("Sprite")
+		var shadow: TextureRect = btn.get_node("Shadow")
+		var hp_plate: ColorRect = btn.get_node("HPPlate")
+		var hp_lbl: Label = btn.get_node("HP")
+		var fx_lbl: Label = btn.get_node("FX")
 
-        var f := sq & 7
-        var r := sq >> 3
-        var is_dark := (f + r) % 2 == 0
-        var stage := state.config.stage if state.config != null else "classic"
-        bg.texture = SpriteFactory.tile_texture_for_stage(is_dark, stage)
-        bg.modulate = Color.WHITE
-        hl.color = Color(0, 0, 0, 0)
-        sprite.texture = null
-        shadow.visible = false
-        hp_plate.visible = false
-        hp_lbl.text = ""
-        fx_lbl.text = ""
+		var f := sq & 7
+		var r := sq >> 3
+		var is_dark := (f + r) % 2 == 0
+		var stage := state.config.stage if state.config != null else "classic"
+		bg.texture = SpriteFactory.tile_texture_for_stage(is_dark, stage)
+		bg.modulate = Color.WHITE
+		hl.color = Color(0, 0, 0, 0)
+		sprite.texture = null
+		shadow.visible = false
+		hp_plate.visible = false
+		hp_lbl.text = ""
+		fx_lbl.text = ""
 
-        # Layered overlays (later overrides earlier). All overlays are
-        # translucent so the tile + piece beneath stays visible.
-        var hl_pulse_kind := ""
-        if debris_pairs_remaining.has(sq):
-            var pairs: int = int(debris_pairs_remaining[sq])
-            hl.color = DEBRIS_WARN_NEAR if pairs <= 1 else DEBRIS_WARN_FAR
-            hl_pulse_kind = "telegraph"
-        if cannon_targets.has(sq):
-            hl.color = CANNON_PENDING_TINT
-            hl_pulse_kind = "telegraph"
-        if (last_status.get("kind", "") == "check" or last_status.get("kind", "") == "checkmate") \
-           and int(last_status.get("royal_sq", -1)) == sq:
-            bg.modulate = Color(1.4, 0.7, 0.7)
-        if mode == "select_move":
-            for m in legal_for_selected:
-                if int(m["to"]) == sq:
-                    hl.color = MOVE_CAPTURE_TINT if m.get("capture", false) else MOVE_EMPTY_TINT
-                    hl_pulse_kind = "move"
-                    break
-        if selected == sq and mode == "select_move":
-            hl.color = SELECTED_TINT
-            hl_pulse_kind = ""   ## selected square owns the scale-pulse below
-        ## Ability targeting — paint the faint "selectable" wash first, then
-        ## let the hover impact and bullseye colors override it on top so
-        ## the impact area pops above the surrounding region.
-        if mode == "select_ability":
-            for t in ability_ctx.get("targets", []):
-                if int(t["sq"]) == sq:
-                    var k = ability_ctx.get("kind")
-                    hl.color = ABILITY_CANNON_TINT if k == SpecialAbilityDef.Kind.CANNON else ABILITY_LIGHT_TINT
-                    hl_pulse_kind = "target"
-                    break
-        if hover_plus.has(sq):
-            hl.color = CANNON_HOVER_TINT
-            hl_pulse_kind = "target"
-        if mode == "select_ability" and sq == hover_target_sq and hover_plus.has(sq) \
-           and int(ability_ctx.get("kind", -1)) == SpecialAbilityDef.Kind.CANNON:
-            ## Bullseye on the actual click target — only meaningful for the
-            ## cannon, where the center is informationally distinct from the
-            ## plus arms. hover_plus.has(sq) gates this to valid targets only
-            ## (hovering off-target leaves hover_plus empty).
-            hl.color = CANNON_CENTER_TINT
-            hl_pulse_kind = "target"
+		# Layered overlays (later overrides earlier). All overlays are
+		# translucent so the tile + piece beneath stays visible.
+		var hl_pulse_kind := ""
+		if debris_pairs_remaining.has(sq):
+			var pairs: int = int(debris_pairs_remaining[sq])
+			hl.color = DEBRIS_WARN_NEAR if pairs <= 1 else DEBRIS_WARN_FAR
+			hl_pulse_kind = "telegraph"
+		if cannon_targets.has(sq):
+			hl.color = CANNON_PENDING_TINT
+			hl_pulse_kind = "telegraph"
+		if (last_status.get("kind", "") == "check" or last_status.get("kind", "") == "checkmate") \
+		   and int(last_status.get("royal_sq", -1)) == sq:
+			bg.modulate = Color(1.4, 0.7, 0.7)
+		if mode == "select_move":
+			for m in legal_for_selected:
+				if int(m["to"]) == sq:
+					hl.color = MOVE_CAPTURE_TINT if m.get("capture", false) else MOVE_EMPTY_TINT
+					hl_pulse_kind = "move"
+					break
+		if selected == sq and mode == "select_move":
+			hl.color = SELECTED_TINT
+			hl_pulse_kind = ""   ## selected square owns the scale-pulse below
+		## Ability targeting — paint the faint "selectable" wash first, then
+		## let the hover impact and bullseye colors override it on top so
+		## the impact area pops above the surrounding region.
+		if mode == "select_ability":
+			for t in ability_ctx.get("targets", []):
+				if int(t["sq"]) == sq:
+					var k = ability_ctx.get("kind")
+					hl.color = ABILITY_CANNON_TINT if k == SpecialAbilityDef.Kind.CANNON else ABILITY_LIGHT_TINT
+					hl_pulse_kind = "target"
+					break
+		if hover_plus.has(sq):
+			hl.color = CANNON_HOVER_TINT
+			hl_pulse_kind = "target"
+		if mode == "select_ability" and sq == hover_target_sq and hover_plus.has(sq) \
+		   and int(ability_ctx.get("kind", -1)) == SpecialAbilityDef.Kind.CANNON:
+			## Bullseye on the actual click target — only meaningful for the
+			## cannon, where the center is informationally distinct from the
+			## plus arms. hover_plus.has(sq) gates this to valid targets only
+			## (hovering off-target leaves hover_plus empty).
+			hl.color = CANNON_CENTER_TINT
+			hl_pulse_kind = "target"
 
-        match hl_pulse_kind:
-            "move": _pulsing_move_overlays.append(hl)
-            "telegraph": _pulsing_telegraphs.append(hl)
-            "target": _pulsing_target_previews.append(hl)
+		match hl_pulse_kind:
+			"move": _pulsing_move_overlays.append(hl)
+			"telegraph": _pulsing_telegraphs.append(hl)
+			"target": _pulsing_target_previews.append(hl)
 
-        var p = state.board[sq]
-        if p != null:
-            var def: PieceDef = state.config.pieces[p.def_id]
-            sprite.texture = SpriteFactory.piece_texture(p.def_id, p.color)
-            sprite.scale = Vector2.ONE
-            sprite.pivot_offset = sprite.size * 0.5
-            shadow.visible = true
-            if Rules.is_frozen(p):
-                sprite.modulate = Color(0.7, 0.85, 1.2)
-            else:
-                sprite.modulate = Color.WHITE
-            if selected == sq and mode == "select_move":
-                _pulsing_selected_sprite = sprite
-            hp_plate.visible = true
-            hp_lbl.text = "%d/%d" % [p.hp, def.hp]
-            hp_lbl.add_theme_color_override("font_color",
-                Color(1, 0.62, 0.62) if p.hp <= 1 else Color.WHITE)
+		var p = state.board[sq]
+		if p != null:
+			var def: PieceDef = state.config.pieces[p.def_id]
+			sprite.texture = SpriteFactory.piece_texture(p.def_id, p.color)
+			sprite.scale = Vector2.ONE
+			sprite.pivot_offset = sprite.size * 0.5
+			shadow.visible = true
+			if Rules.is_frozen(p):
+				sprite.modulate = Color(0.7, 0.85, 1.2)
+			else:
+				sprite.modulate = Color.WHITE
+			if selected == sq and mode == "select_move":
+				_pulsing_selected_sprite = sprite
+			## HP plate — show only when piece is damaged, selected, or
+			## targeted by an active ability. Healthy idle pieces don't
+			## need a plate; the eye gets a clean board to rest on.
+			var is_targeted := false
+			if mode == "select_ability":
+				for t in ability_ctx.get("targets", []):
+					if int(t["sq"]) == sq:
+						is_targeted = true
+						break
+			var damaged: bool = p.hp < def.hp
+			var hp_relevant: bool = damaged or selected == sq or is_targeted or sq == hover_target_sq
+			hp_plate.visible = hp_relevant
+			hp_lbl.text = ("%d/%d" % [p.hp, def.hp]) if hp_relevant else ""
+			hp_lbl.add_theme_color_override("font_color",
+				Color(1, 0.62, 0.62) if p.hp <= 1 else Color.WHITE)
 
-            var fx_parts: Array = []
-            for e in p.active_effects:
-                if e.turns_remaining <= 0: continue
-                if e.kind == StatusEffectDef.Kind.BURN:
-                    fx_parts.append("🔥%d" % e.turns_remaining)
-                elif e.kind == StatusEffectDef.Kind.FREEZE:
-                    fx_parts.append("❄%d" % e.turns_remaining)
-            fx_lbl.text = " ".join(fx_parts)
+			var fx_parts: Array = []
+			for e in p.active_effects:
+				if e.turns_remaining <= 0: continue
+				if e.kind == StatusEffectDef.Kind.BURN:
+					fx_parts.append("🔥%d" % e.turns_remaining)
+				elif e.kind == StatusEffectDef.Kind.FREEZE:
+					fx_parts.append("❄%d" % e.turns_remaining)
+			fx_lbl.text = " ".join(fx_parts)
 
-        ## Debris countdown badge — render the impact-pair count on the
-        ## targeted square so the player can plan around the timing. Sits
-        ## in the FX slot when the square is empty, otherwise prepended
-        ## ahead of any status-effect glyphs.
-        if debris_pairs_remaining.has(sq):
-            var pairs: int = int(debris_pairs_remaining[sq])
-            var glyph := "☄%d" % maxi(pairs, 1)
-            fx_lbl.text = (glyph + " " + fx_lbl.text) if fx_lbl.text != "" else glyph
+		## Debris countdown badge — render the impact-pair count on the
+		## targeted square so the player can plan around the timing. Sits
+		## in the FX slot when the square is empty, otherwise prepended
+		## ahead of any status-effect glyphs.
+		if debris_pairs_remaining.has(sq):
+			var pairs: int = int(debris_pairs_remaining[sq])
+			var glyph := "☄%d" % maxi(pairs, 1)
+			fx_lbl.text = (glyph + " " + fx_lbl.text) if fx_lbl.text != "" else glyph
 
-    # --- Status text ---
-    var side_name := "White" if state.side == Rules.WHITE else "Black"
-    match last_status.get("kind", ""):
-        "checkmate":
-            var w = last_status.get("winner", -1)
-            var text := "Checkmate. %s wins." % ("White" if w == Rules.WHITE else "Black")
-            status_label.text = text
-            end_label.text = text
-            end_label.visible = true
-        "stalemate":
-            status_label.text = "Stalemate. Draw."
-            end_label.text = "Stalemate — Draw"
-            end_label.visible = true
-        "draw50":
-            status_label.text = "50-move rule. Draw."
-            end_label.text = "50-move rule — Draw"
-            end_label.visible = true
-        "check":
-            status_label.text = "%s to move — in check." % side_name
-            end_label.visible = false
-        _:
-            status_label.text = "%s to move." % side_name
-            end_label.visible = false
+	# --- Status text (top utility bar) ---
+	var side_name := "White" if state.side == Rules.WHITE else "Black"
+	var move_prefix := "Move %d · " % state.fullmove
+	match last_status.get("kind", ""):
+		"checkmate":
+			var w = last_status.get("winner", -1)
+			var winner_name := "White" if w == Rules.WHITE else "Black"
+			top_status_label.text = "Checkmate. %s wins." % winner_name
+			end_label.text = "Checkmate — %s wins" % winner_name
+			end_label.visible = true
+		"stalemate":
+			top_status_label.text = "Stalemate. Draw."
+			end_label.text = "Stalemate — Draw"
+			end_label.visible = true
+		"draw50":
+			top_status_label.text = "50-move rule. Draw."
+			end_label.text = "50-move rule — Draw"
+			end_label.visible = true
+		"check":
+			top_status_label.text = "%s%s to move · in check" % [move_prefix, side_name]
+			end_label.visible = false
+		_:
+			top_status_label.text = "%s%s to move" % [move_prefix, side_name]
+			end_label.visible = false
 
-    _render_side_panel(Rules.BLACK)
-    _render_side_panel(Rules.WHITE)
+	_render_player_panel(Rules.BLACK)
+	_render_player_panel(Rules.WHITE)
+	_render_left_rail()
 
 # ----------------------------------------------------------------------------
-# Side panel render — energy bar + ability icons for the given color. The
-# active side's icons are clickable and show "ready" affordance; the
-# inactive side renders the same data but icons are non-interactive.
+# Left rail render — captured pieces tray + move history list. Both
+# driven by UI-side ledgers (captured_by_*, move_log) updated in
+# _play_move. No engine changes.
 # ----------------------------------------------------------------------------
-func _render_side_panel(color: int) -> void:
-    var bar: HBoxContainer = white_energy_bar if color == Rules.WHITE else black_energy_bar
-    var icons: HBoxContainer = white_ability_panel if color == Rules.WHITE else black_ability_panel
-    var energy: int = int(state.energy[color]) if color < state.energy.size() else 0
+func _render_left_rail() -> void:
+	## Captured trays — clear and rebuild as small piece sprites.
+	for box in [captured_white_box, captured_black_box]:
+		for c in box.get_children(): c.queue_free()
+	for rec in captured_by_black:
+		## Black captured a white piece -> shown in white tray (top half)
+		captured_white_box.add_child(_make_captured_icon(rec.def_id, rec.color))
+	for rec in captured_by_white:
+		## White captured a black piece -> shown in black tray (bottom half)
+		captured_black_box.add_child(_make_captured_icon(rec.def_id, rec.color))
 
-    ## Energy bar — fill from the inside outward (toward the board edge),
-    ## so the player's "incoming" elixir reads as flowing toward them.
-    for i in bar.get_child_count():
-        var seg: TextureRect = bar.get_child(i)
-        seg.texture = SpriteFactory.energy_segment_texture(i < energy)
+	## Move history — rebuild as one row per fullmove with white | black.
+	for c in move_history_list.get_children(): c.queue_free()
+	var i := 0
+	while i < move_log.size():
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var num := Label.new()
+		num.text = "%d." % (i / 2 + 1)
+		num.add_theme_font_size_override("font_size", 11)
+		num.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74, 0.5))
+		num.custom_minimum_size = Vector2(24, 0)
+		row.add_child(num)
 
-    ## Numeric readout — find the sibling labelled energy_count.
-    for child in bar.get_parent().get_children():
-        if child is Label and child.has_meta("role") and String(child.get_meta("role")) == "energy_count":
-            child.text = "%d" % energy
-            break
+		var white_lbl := Label.new()
+		white_lbl.text = _format_move(move_log[i]) if i < move_log.size() else ""
+		white_lbl.add_theme_font_size_override("font_size", 12)
+		white_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+		white_lbl.custom_minimum_size = Vector2(70, 0)
+		row.add_child(white_lbl)
 
-    ## Ability icons — both of the configured abilities are shown for both
-    ## sides at all times, but only the enabled ability is interactive
-    ## (per game). Each icon shows cost, charges, and cooldown grey-out.
-    for c in icons.get_children(): c.queue_free()
+		if i + 1 < move_log.size():
+			var black_lbl := Label.new()
+			black_lbl.text = _format_move(move_log[i + 1])
+			black_lbl.add_theme_font_size_override("font_size", 12)
+			black_lbl.add_theme_color_override("font_color", Color(0.95, 0.88, 0.74))
+			black_lbl.custom_minimum_size = Vector2(70, 0)
+			row.add_child(black_lbl)
 
-    var cfg: GameConfig = state.config
-    var enabled := cfg.enabled_ability
-    if enabled == SpecialAbilityDef.Kind.NONE:
-        var note := Label.new()
-        note.text = "—"
-        note.modulate = Color(1, 1, 1, 0.4)
-        icons.add_child(note)
-        return
+		## Highlight the most recently played move (last entry in the log)
+		## by brightening the row's modulate. Cheaper than a background
+		## ColorRect (which would need a panel wrapper to render behind
+		## the labels in an HBoxContainer flow layout).
+		if i == move_log.size() - 1 or i + 1 == move_log.size() - 1:
+			row.modulate = Color(1.10, 1.05, 0.85, 1.0)
+		move_history_list.add_child(row)
+		i += 2
 
-    if enabled == SpecialAbilityDef.Kind.CANNON:
-        icons.add_child(_make_ability_card(SpecialAbilityDef.Kind.CANNON, color))
-    if enabled == SpecialAbilityDef.Kind.LIGHTNING:
-        icons.add_child(_make_ability_card(SpecialAbilityDef.Kind.LIGHTNING, color))
+	## Auto-scroll to latest. Wait one frame so the new children have
+	## been measured before we read the scroll's max range.
+	if move_history_scroll != null:
+		await get_tree().process_frame
+		if is_instance_valid(move_history_scroll):
+			move_history_scroll.scroll_vertical = int(move_history_scroll.get_v_scroll_bar().max_value)
 
-## One ability card. Shows the icon, cost, charges, and a translucent
-## overlay during cooldown / insufficient-energy. Clickable only for the
-## side-to-move (and only on the ability's own row).
+func _make_captured_icon(def_id: String, color: int) -> Control:
+	var holder := Control.new()
+	holder.custom_minimum_size = Vector2(20, 20)
+	var tr := TextureRect.new()
+	tr.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tr.texture = SpriteFactory.piece_texture(def_id, color)
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	holder.add_child(tr)
+	return holder
+
+## Compact algebraic-ish formatting. Lacks check/mate suffix and
+## disambiguation, but adequate as a UI-only history display.
+func _format_move(rec: Dictionary) -> String:
+	var from_sq: int = int(rec.get("from_sq", -1))
+	var to_sq: int = int(rec.get("to_sq", -1))
+	if from_sq < 0 or to_sq < 0: return "?"
+	var to_str := "%s%d" % ["abcdefgh"[to_sq & 7], (to_sq >> 3) + 1]
+	var from_str := "%s%d" % ["abcdefgh"[from_sq & 7], (from_sq >> 3) + 1]
+	var glyph := _piece_glyph(String(rec.get("def_id", "pawn")))
+	var sep := "x" if rec.get("capture", false) else "-"
+	var promo := ""
+	if rec.has("promo") and rec["promo"] != "":
+		promo = "=" + _piece_glyph(String(rec["promo"]))
+	return "%s%s%s%s%s" % [glyph, from_str, sep, to_str, promo]
+
+func _piece_glyph(def_id: String) -> String:
+	match def_id:
+		"king":            return "K"
+		"queen":           return "Q"
+		"rook":            return "R"
+		"bishop":          return "B"
+		"knight":          return "N"
+		"pawn":            return ""
+		"alter_knight":    return "N"
+		"assassin_bishop": return "B"
+		"bandit_pawn":     return ""
+	return ""
+
+# ----------------------------------------------------------------------------
+# Player panel render — vertical energy bar + ability card for the given
+# color. Active side gets a soft glow on the panel; inactive side
+# desaturates slightly so the eye is drawn to whose turn it is.
+# ----------------------------------------------------------------------------
+func _render_player_panel(color: int) -> void:
+	var bar: VBoxContainer = white_energy_bar if color == Rules.WHITE else black_energy_bar
+	var holder: Control = white_ability_holder if color == Rules.WHITE else black_ability_holder
+	var num_lbl: Label = white_energy_count_label if color == Rules.WHITE else black_energy_count_label
+	var panel: Control = white_player_panel if color == Rules.WHITE else black_player_panel
+	var energy: int = int(state.energy[color]) if color < state.energy.size() else 0
+
+	## Energy bar — each segment carries an "idx" meta (0 = bottom = fills
+	## first, 9 = top = depletes last). Segment is filled iff energy > idx.
+	for i in bar.get_child_count():
+		var seg: TextureRect = bar.get_child(i)
+		var idx: int = int(seg.get_meta("idx"))
+		seg.texture = SpriteFactory.energy_segment_texture(idx < energy)
+
+	num_lbl.text = "%d" % energy
+
+	## Active-side glow — soft cream glow on the panel border for the
+	## side to move; inactive side stays neutral. Use modulate on the
+	## whole panel so the desaturation/darkening is uniform.
+	if color == state.side:
+		panel.modulate = Color(1.0, 1.0, 1.0, 1.0)
+	else:
+		panel.modulate = Color(0.72, 0.72, 0.78, 1.0)
+
+	## Ability card — repopulate; the active ability and its state
+	## change per render.
+	for c in holder.get_children(): c.queue_free()
+
+	var cfg: GameConfig = state.config
+	var enabled := cfg.enabled_ability
+	if enabled == SpecialAbilityDef.Kind.NONE:
+		var note := Label.new()
+		note.text = "—"
+		note.modulate = Color(1, 1, 1, 0.4)
+		note.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
+		holder.add_child(note)
+		return
+
+	var card: Control = null
+	if enabled == SpecialAbilityDef.Kind.CANNON:
+		card = _make_ability_card(SpecialAbilityDef.Kind.CANNON, color)
+	elif enabled == SpecialAbilityDef.Kind.LIGHTNING:
+		card = _make_ability_card(SpecialAbilityDef.Kind.LIGHTNING, color)
+	if card != null:
+		card.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		holder.add_child(card)
+
+## One ability card — bigger and richer than the previous 64×40 version.
+## Three-zone interior: pixel icon (top), pip charges (bottom-left),
+## energy cost (bottom-right). Cooldown is a radial sweep (TextureProgressBar
+## mode = MODE_RADIAL), not a stamp. Insufficient energy desaturates the
+## icon instead of dimming so the icon stays legible.
 func _make_ability_card(kind: int, color: int) -> Control:
-    var spec: SpecialAbilityDef = state.config.cannon if kind == SpecialAbilityDef.Kind.CANNON \
-                                  else state.config.lightning
-    var rt: Dictionary = {}
-    if kind == SpecialAbilityDef.Kind.CANNON \
-       and color < state.cannon_state.size():
-        rt = state.cannon_state[color]
-    elif kind == SpecialAbilityDef.Kind.LIGHTNING \
-         and color < state.lightning_state.size():
-        rt = state.lightning_state[color]
-    var charges: int = int(rt.get("charges", 0))
-    var recharge: int = int(rt.get("recharge", 0))
-    var max_c: int = spec.max_charges
-    var on_cooldown := charges < max_c and recharge > 0
-    var energy: int = int(state.energy[color]) if color < state.energy.size() else 0
-    var insufficient_energy := energy < spec.energy_cost
-    var armed := mode == "select_ability" \
-                 and int(ability_ctx.get("kind", -1)) == kind \
-                 and color == state.side
+	var spec: SpecialAbilityDef = state.config.cannon if kind == SpecialAbilityDef.Kind.CANNON \
+								  else state.config.lightning
+	var rt: Dictionary = {}
+	if kind == SpecialAbilityDef.Kind.CANNON \
+	   and color < state.cannon_state.size():
+		rt = state.cannon_state[color]
+	elif kind == SpecialAbilityDef.Kind.LIGHTNING \
+		 and color < state.lightning_state.size():
+		rt = state.lightning_state[color]
+	var charges: int = int(rt.get("charges", 0))
+	var recharge: int = int(rt.get("recharge", 0))
+	var max_c: int = spec.max_charges
+	var on_cooldown := charges < max_c and recharge > 0
+	var energy: int = int(state.energy[color]) if color < state.energy.size() else 0
+	var insufficient_energy := energy < spec.energy_cost
+	var armed := mode == "select_ability" \
+				 and int(ability_ctx.get("kind", -1)) == kind \
+				 and color == state.side
 
-    var card := PanelContainer.new()
-    card.custom_minimum_size = Vector2(64, 40)
-    var sb := StyleBoxFlat.new()
-    sb.bg_color = Color(0.10, 0.12, 0.16)
-    sb.border_color = Color(0.05, 0.06, 0.10)
-    sb.set_border_width_all(2)
-    sb.set_corner_radius_all(0)   ## square pixel-art corners
-    sb.set_content_margin_all(2)
-    if armed:
-        sb.border_color = Color(1.0, 0.92, 0.30)
-        sb.set_border_width_all(3)
-    card.add_theme_stylebox_override("panel", sb)
+	var card := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.10, 0.12, 0.16)
+	sb.border_color = Color(0.05, 0.06, 0.10)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(0)   ## square pixel-art corners
+	sb.set_content_margin_all(4)
+	if armed:
+		sb.border_color = Color(1.0, 0.92, 0.30)
+		sb.set_border_width_all(3)
+	card.add_theme_stylebox_override("panel", sb)
 
-    var stack := Control.new()
-    stack.custom_minimum_size = Vector2(58, 34)
-    card.add_child(stack)
+	var stack := Control.new()
+	stack.custom_minimum_size = Vector2(0, 88)
+	stack.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	card.add_child(stack)
 
-    ## Pixel-art icon
-    var icon := TextureRect.new()
-    icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-    icon.offset_top = 0; icon.offset_left = 12; icon.offset_right = -12
-    icon.offset_bottom = -12
-    icon.texture = SpriteFactory.ability_icon_texture(kind)
-    icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-    icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    stack.add_child(icon)
+	## Pixel-art icon — top half of the card, ~50% of card height.
+	var icon := TextureRect.new()
+	icon.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	icon.offset_top = 4
+	icon.offset_bottom = 56
+	icon.offset_left = 4
+	icon.offset_right = -4
+	icon.texture = SpriteFactory.ability_icon_texture(kind)
+	icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if insufficient_energy and color == state.side and not on_cooldown:
+		## Desaturate (don't dim) so the icon stays legible.
+		icon.modulate = Color(0.55, 0.55, 0.60, 1.0)
+	stack.add_child(icon)
 
-    ## Cost badge — small "⚡N" tag in the top-right
-    var cost := Label.new()
-    cost.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-    cost.offset_left = -22; cost.offset_top = -2
-    cost.offset_right = 0
-    cost.add_theme_font_size_override("font_size", 12)
-    cost.text = "%d⚡" % spec.energy_cost
-    var cost_color := Color(0.62, 0.92, 1.0) if not insufficient_energy else Color(1, 0.55, 0.55)
-    cost.add_theme_color_override("font_color", cost_color)
-    cost.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    stack.add_child(cost)
+	## Pip charges — bottom-left. Filled circle = available charge,
+	## hollow ring = used. Easier to scan than "2/3" text at small sizes.
+	var pip_row := HBoxContainer.new()
+	pip_row.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
+	pip_row.offset_top = -18; pip_row.offset_bottom = -4
+	pip_row.offset_left = 4
+	pip_row.add_theme_constant_override("separation", 3)
+	pip_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(pip_row)
+	for i in max_c:
+		pip_row.add_child(_make_pip(i < charges))
 
-    ## Charge count along the bottom-left
-    var charge_lbl := Label.new()
-    charge_lbl.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
-    charge_lbl.offset_top = -14; charge_lbl.offset_bottom = 0
-    charge_lbl.offset_left = 2
-    charge_lbl.add_theme_font_size_override("font_size", 11)
-    charge_lbl.text = "%d/%d" % [charges, max_c]
-    charge_lbl.modulate = Color(1, 1, 1, 0.85)
-    charge_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    stack.add_child(charge_lbl)
+	## Energy cost — bottom-right. Single oversized number + ⚡ glyph.
+	var cost := Label.new()
+	cost.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	cost.offset_top = -22; cost.offset_bottom = -2
+	cost.offset_left = -42; cost.offset_right = -4
+	cost.add_theme_font_size_override("font_size", 18)
+	cost.text = "%d⚡" % spec.energy_cost
+	cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	cost.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var cost_color := Color(0.62, 0.92, 1.0) if not insufficient_energy else Color(1, 0.55, 0.55)
+	cost.add_theme_color_override("font_color", cost_color)
+	cost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_child(cost)
 
-    ## Cooldown overlay — greys out and shows remaining-turns count
-    if on_cooldown:
-        var dim := ColorRect.new()
-        dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        dim.color = Color(0, 0, 0, 0.55)
-        dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        stack.add_child(dim)
-        var cd_num := Label.new()
-        cd_num.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        cd_num.text = "%d" % recharge
-        cd_num.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-        cd_num.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-        cd_num.add_theme_font_size_override("font_size", 22)
-        cd_num.modulate = Color(1, 1, 1, 0.95)
-        cd_num.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        stack.add_child(cd_num)
-    elif insufficient_energy and color == state.side:
-        ## Slightly less aggressive dim — shows "available eventually" but
-        ## not currently spendable. No number overlay.
-        var dim := ColorRect.new()
-        dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        dim.color = Color(0, 0, 0, 0.45)
-        dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        stack.add_child(dim)
-    elif color != state.side:
-        ## Opponent's ability — tint slightly to convey "not yours to fire"
-        ## without hiding the data. Still readable as a status indicator.
-        var dim := ColorRect.new()
-        dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        dim.color = Color(0, 0, 0, 0.30)
-        dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        stack.add_child(dim)
+	## Cooldown radial sweep — depletes from full → empty as recharge
+	## counts down. Built with a TextureProgressBar in radial mode.
+	if on_cooldown:
+		var radial := TextureProgressBar.new()
+		radial.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		radial.fill_mode = TextureProgressBar.FILL_CLOCKWISE
+		radial.min_value = 0
+		radial.max_value = max(spec.cooldown_turns, 1)
+		radial.value = recharge
+		radial.tint_progress = Color(0, 0, 0, 0.65)
+		radial.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		## Use a procedurally generated 1x1 white texture as the source so
+		## the radial mask works without an external asset. Done by
+		## creating a small ImageTexture filled with white.
+		var img := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+		img.fill(Color(1, 1, 1, 1))
+		var tex := ImageTexture.create_from_image(img)
+		radial.texture_progress = tex
+		stack.add_child(radial)
 
-    ## Make the card itself clickable when it belongs to side-to-move,
-    ## isn't on cooldown, and energy is sufficient. State.special_used_this_turn
-    ## also disables — list_ability_targets returns empty in that case.
-    var clickable := color == state.side \
-                     and not on_cooldown \
-                     and not insufficient_energy \
-                     and charges > 0 \
-                     and not state.special_used_this_turn
-    if clickable:
-        ## Ready icons get the breathing-color pulse (PIECE-VARIANTS.md §4.7).
-        _pulsing_ability_icons.append(icon)
-        var hit := Button.new()
-        hit.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        hit.flat = true
-        hit.focus_mode = Control.FOCUS_NONE
-        hit.tooltip_text = _describe_ability(spec)
-        hit.pressed.connect(_on_ability_button_clicked.bind(kind))
-        stack.add_child(hit)
+	## Opponent's ability — light dim so it reads as "not yours" without
+	## obscuring the data.
+	if color != state.side and not on_cooldown:
+		var dim := ColorRect.new()
+		dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		dim.color = Color(0, 0, 0, 0.20)
+		dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		stack.add_child(dim)
 
-    return card
+	## Make the card itself clickable when it belongs to side-to-move,
+	## isn't on cooldown, and energy is sufficient. State.special_used_this_turn
+	## also disables — list_ability_targets returns empty in that case.
+	var clickable := color == state.side \
+					 and not on_cooldown \
+					 and not insufficient_energy \
+					 and charges > 0 \
+					 and not state.special_used_this_turn
+	if clickable:
+		## Ready icons get the breathing-color pulse (PIECE-VARIANTS.md §4.7).
+		_pulsing_ability_icons.append(icon)
+		var hit := Button.new()
+		hit.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		hit.flat = true
+		hit.focus_mode = Control.FOCUS_NONE
+		hit.tooltip_text = _describe_ability(spec)
+		hit.pressed.connect(_on_ability_button_clicked.bind(kind))
+		stack.add_child(hit)
+
+	return card
+
+## Single charge pip — filled circle (available) or hollow ring (used).
+## 10x10 pixel art via two stacked ColorRects: outer ring + inner fill.
+func _make_pip(filled: bool) -> Control:
+	var pip := Control.new()
+	pip.custom_minimum_size = Vector2(10, 10)
+	var ring := ColorRect.new()
+	ring.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ring.color = Color(0.95, 0.88, 0.74) if filled else Color(0.95, 0.88, 0.74, 0.55)
+	ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pip.add_child(ring)
+	if not filled:
+		var hole := ColorRect.new()
+		hole.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		hole.offset_left = 2; hole.offset_top = 2
+		hole.offset_right = -2; hole.offset_bottom = -2
+		hole.color = Color(0.10, 0.12, 0.16)
+		hole.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		pip.add_child(hole)
+	return pip
 
 func _describe_ability(spec: SpecialAbilityDef) -> String:
-    if spec.kind == SpecialAbilityDef.Kind.CANNON:
-        return "Cannon — Plus AOE, %d dmg, lands next turn.\nCooldown %d, costs %d⚡." \
-               % [spec.damage, spec.cooldown_turns, spec.energy_cost]
-    elif spec.kind == SpecialAbilityDef.Kind.LIGHTNING:
-        return "Lightning — single target, %d dmg, instant.\nCannot target king. Cooldown %d, costs %d⚡." \
-               % [spec.damage, spec.cooldown_turns, spec.energy_cost]
-    return ""
+	if spec.kind == SpecialAbilityDef.Kind.CANNON:
+		return "Cannon — Plus AOE, %d dmg, lands next turn.\nCooldown %d, costs %d⚡." \
+			   % [spec.damage, spec.cooldown_turns, spec.energy_cost]
+	elif spec.kind == SpecialAbilityDef.Kind.LIGHTNING:
+		return "Lightning — single target, %d dmg, instant.\nCannot target king. Cooldown %d, costs %d⚡." \
+			   % [spec.damage, spec.cooldown_turns, spec.energy_cost]
+	return ""
 
 # ============================================================================
 # CLICK FLOW
 # ============================================================================
 
 func _on_square_clicked(sq: int) -> void:
-    if _animating: return
-    if not pending_promo.is_empty(): return
-    if _game_over(): return
+	if _animating: return
+	if not pending_promo.is_empty(): return
+	if _game_over(): return
 
-    if mode == "select_ability":
-        _handle_ability_click(sq)
-        return
+	if mode == "select_ability":
+		_handle_ability_click(sq)
+		return
 
-    if mode == "select_move" and selected != -1:
-        var matches: Array = []
-        for m in legal_for_selected:
-            if int(m["to"]) == sq:
-                matches.append(m)
-        if matches.size() == 1 and not matches[0].has("promo"):
-            _play_move(matches[0])
-            return
-        if matches.size() > 0 and matches[0].has("promo"):
-            pending_promo = matches
-            _show_promo_picker(matches)
-            return
+	if mode == "select_move" and selected != -1:
+		var matches: Array = []
+		for m in legal_for_selected:
+			if int(m["to"]) == sq:
+				matches.append(m)
+		if matches.size() == 1 and not matches[0].has("promo"):
+			_play_move(matches[0])
+			return
+		if matches.size() > 0 and matches[0].has("promo"):
+			pending_promo = matches
+			_show_promo_picker(matches, sq)
+			return
 
-    var p = state.board[sq]
-    if p != null and p.color == state.side and not Rules.is_frozen(p):
-        selected = sq
-        legal_for_selected = []
-        for m in last_status.get("moves", []):
-            if int(m["from"]) == sq: legal_for_selected.append(m)
-        mode = "select_move" if legal_for_selected.size() > 0 else "select_piece"
-    else:
-        selected = -1
-        legal_for_selected = []
-        mode = "select_piece"
-    _render()
+	var p = state.board[sq]
+	if p != null and p.color == state.side and not Rules.is_frozen(p):
+		selected = sq
+		legal_for_selected = []
+		for m in last_status.get("moves", []):
+			if int(m["from"]) == sq: legal_for_selected.append(m)
+		mode = "select_move" if legal_for_selected.size() > 0 else "select_piece"
+	else:
+		selected = -1
+		legal_for_selected = []
+		mode = "select_piece"
+	_render()
 
 func _on_ability_button_clicked(kind: int) -> void:
-    if _animating: return
-    if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
-        _cancel_ability()
-        return
-    var targets: Array = Rules.list_ability_targets(state, kind)
-    if targets.is_empty(): return
-    ability_ctx = {
-        "kind": kind,
-        "targets": targets,
-    }
-    mode = "select_ability"
-    selected = -1
-    legal_for_selected = []
-    _render()
+	if _animating: return
+	if mode == "select_ability" and int(ability_ctx.get("kind", -1)) == kind:
+		_cancel_ability()
+		return
+	var targets: Array = Rules.list_ability_targets(state, kind)
+	if targets.is_empty(): return
+	ability_ctx = {
+		"kind": kind,
+		"targets": targets,
+	}
+	mode = "select_ability"
+	selected = -1
+	legal_for_selected = []
+	_render()
 
 func _handle_ability_click(sq: int) -> void:
-    var found := false
-    for t in ability_ctx.get("targets", []):
-        if int(t["sq"]) == sq:
-            found = true; break
-    if not found:
-        _cancel_ability()
-        return
-    var old_state := state
-    var r := Rules.apply_ability(state, {
-        "kind": int(ability_ctx["kind"]),
-        "target_sq": sq,
-    })
-    state = r["state"]
-    ## Ability does not flip side — recompute status for SAME side.
-    last_status = Rules.game_status(state)
-    mode = "select_piece"
-    ability_ctx = {}
-    selected = -1
-    legal_for_selected = []
+	var found := false
+	for t in ability_ctx.get("targets", []):
+		if int(t["sq"]) == sq:
+			found = true; break
+	if not found:
+		_cancel_ability()
+		return
+	var old_state := state
+	var r := Rules.apply_ability(state, {
+		"kind": int(ability_ctx["kind"]),
+		"target_sq": sq,
+	})
+	state = r["state"]
+	## Ability does not flip side — recompute status for SAME side.
+	last_status = Rules.game_status(state)
+	mode = "select_piece"
+	ability_ctx = {}
+	selected = -1
+	legal_for_selected = []
 
-    _animating = true
-    await _animate_events(old_state, r["events"])
-    _animating = false
-    _render()
+	_animating = true
+	await _animate_events(old_state, r["events"])
+	_animating = false
+	_render()
 
 func _cancel_ability() -> void:
-    mode = "select_piece"
-    ability_ctx = {}
-    selected = -1
-    legal_for_selected = []
-    _render()
+	mode = "select_piece"
+	ability_ctx = {}
+	selected = -1
+	legal_for_selected = []
+	_render()
 
 func _on_square_hover(sq: int) -> void:
-    if mode != "select_ability":
-        if hover_target_sq != -1:
-            hover_target_sq = -1
-            _render()
-        return
-    if hover_target_sq == sq: return
-    hover_target_sq = sq
-    _render()
+	if mode != "select_ability":
+		if hover_target_sq != -1:
+			hover_target_sq = -1
+			_render()
+		return
+	if hover_target_sq == sq: return
+	hover_target_sq = sq
+	_render()
 
 func _game_over() -> bool:
-    var k = last_status.get("kind", "")
-    return k == "checkmate" or k == "stalemate" or k == "draw50"
+	var k = last_status.get("kind", "")
+	return k == "checkmate" or k == "stalemate" or k == "draw50"
 
 # ============================================================================
 # MOVE EXECUTION
 # ============================================================================
 
 func _play_move(m: Dictionary) -> void:
-    var old_state := state
-    var r := Rules.apply_move(state, m)
-    state = r["state"]
-    selected = -1
-    legal_for_selected = []
-    mode = "select_piece"
-    ability_ctx = {}
-    hover_target_sq = -1
-    last_status = Rules.game_status(state)
+	var old_state := state
+	var mover_color: int = old_state.side   ## who moved (state.side flips)
+	var mover_def_id := ""
+	var from_sq: int = int(m.get("from", -1))
+	if from_sq >= 0 and old_state.board[from_sq] != null:
+		mover_def_id = old_state.board[from_sq].def_id
+	var r := Rules.apply_move(state, m)
+	state = r["state"]
+	selected = -1
+	legal_for_selected = []
+	mode = "select_piece"
+	ability_ctx = {}
+	hover_target_sq = -1
+	last_status = Rules.game_status(state)
 
-    ## Animate based on the events list before snapping to the new layout.
-    ## Static cells still hold the OLD render (we haven't called _render yet)
-    ## so floating sprites in anim_overlay slide over the unchanged board.
-    _animating = true
-    await _animate_events(old_state, r["events"])
-    _animating = false
-    _render()
+	## Track captured pieces and append a move log entry. Captures are
+	## inferred from "kill" events; the captured-color is the color of
+	## the piece that occupied the killed square BEFORE apply_move.
+	var any_capture := false
+	for ev in r["events"]:
+		if String(ev.get("kind", "")) != "kill": continue
+		var sq := int(ev.get("sq", -1))
+		if sq < 0 or old_state.board[sq] == null: continue
+		var victim = old_state.board[sq]
+		if victim.color == Rules.WHITE:
+			captured_by_black.append({"def_id": victim.def_id, "color": victim.color})
+		else:
+			captured_by_white.append({"def_id": victim.def_id, "color": victim.color})
+		any_capture = true
+	move_log.append({
+		"side": mover_color,
+		"from_sq": int(m.get("from", -1)),
+		"to_sq": int(m.get("to", -1)),
+		"def_id": mover_def_id,
+		"capture": any_capture or m.get("capture", false),
+		"promo": String(m.get("promo", "")),
+	})
+
+	## Animate based on the events list before snapping to the new layout.
+	## Static cells still hold the OLD render (we haven't called _render yet)
+	## so floating sprites in anim_overlay slide over the unchanged board.
+	_animating = true
+	await _animate_events(old_state, r["events"])
+	_animating = false
+	_render()
 
 # ============================================================================
 # ANIMATIONS — sprite-based (Tween + transient TextureRects), no particles.
@@ -983,39 +1410,39 @@ func _play_move(m: Dictionary) -> void:
 # ============================================================================
 
 func _sq_to_pos(sq: int) -> Vector2:
-    var f := sq & 7
-    var r := sq >> 3
-    return Vector2(f * SQ_SIZE, (7 - r) * SQ_SIZE)
+	var f := sq & 7
+	var r := sq >> 3
+	return Vector2(f * SQ_SIZE, (7 - r) * SQ_SIZE)
 
 func _create_floating_piece(piece: Piece, sq: int) -> TextureRect:
-    var tr := TextureRect.new()
-    tr.texture = SpriteFactory.piece_texture(piece.def_id, piece.color)
-    tr.size = Vector2(SQ_SIZE - 8, SQ_SIZE - 8)
-    tr.position = _sq_to_pos(sq) + Vector2(4, 4)
-    tr.pivot_offset = Vector2(tr.size.x * 0.5, tr.size.y * 0.5)
-    tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-    tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    anim_overlay.add_child(tr)
-    return tr
+	var tr := TextureRect.new()
+	tr.texture = SpriteFactory.piece_texture(piece.def_id, piece.color)
+	tr.size = Vector2(SQ_SIZE - 8, SQ_SIZE - 8)
+	tr.position = _sq_to_pos(sq) + Vector2(4, 4)
+	tr.pivot_offset = Vector2(tr.size.x * 0.5, tr.size.y * 0.5)
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	anim_overlay.add_child(tr)
+	return tr
 
 ## Sprite-based FX sized to a single square. Used by ability resolves
 ## (cannon / debris / lightning). The first frame is set on creation so
 ## there's no transparent flicker before the first scheduled swap fires.
 func _create_fx_sprite(sq: int, frames: Array, tint: Color = Color.WHITE) -> TextureRect:
-    var tr := TextureRect.new()
-    if not frames.is_empty(): tr.texture = frames[0]
-    tr.size = Vector2(SQ_SIZE, SQ_SIZE)
-    tr.position = _sq_to_pos(sq)
-    tr.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
-    tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-    tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-    tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-    tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    tr.modulate = tint
-    anim_overlay.add_child(tr)
-    return tr
+	var tr := TextureRect.new()
+	if not frames.is_empty(): tr.texture = frames[0]
+	tr.size = Vector2(SQ_SIZE, SQ_SIZE)
+	tr.position = _sq_to_pos(sq)
+	tr.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	tr.modulate = tint
+	anim_overlay.add_child(tr)
+	return tr
 
 ## Schedule a one-shot piece animation by swapping `lbl.texture` through the
 ## frame array for `anim` over `total_dur` seconds, starting at `delay`.
@@ -1023,301 +1450,381 @@ func _create_fx_sprite(sq: int, frames: Array, tint: Color = Color.WHITE) -> Tex
 ## variant-specific anims (jump, lunge) from blowing up when they're missing
 ## on a stock piece.
 func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
-                          color: int, anim: String, total_dur: float,
-                          delay: float) -> void:
-    var dict: Dictionary = SpriteFactory.piece_frames(def_id, color)
-    if not dict.has(anim): return
-    UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
+						  color: int, anim: String, total_dur: float,
+						  delay: float) -> void:
+	var dict: Dictionary = SpriteFactory.piece_frames(def_id, color)
+	if not dict.has(anim): return
+	UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
 
 ## Knight / Alter Knight parabolic arc — driven by tween_method so the
 ## position computation is per-tick and overrides the linear lerp the
 ## position tween would otherwise produce. KNIGHT_ARC_HEIGHT controls the
 ## peak height; the parabola peaks at t = 0.5.
 func _set_knight_arc_pos(t: float, lbl: TextureRect,
-                          from_pos: Vector2, to_pos: Vector2) -> void:
-    if not is_instance_valid(lbl): return
-    var pos := from_pos.lerp(to_pos, t)
-    pos.y -= KNIGHT_ARC_HEIGHT * 4.0 * t * (1.0 - t)
-    lbl.position = pos
+						  from_pos: Vector2, to_pos: Vector2) -> void:
+	if not is_instance_valid(lbl): return
+	var pos := from_pos.lerp(to_pos, t)
+	pos.y -= KNIGHT_ARC_HEIGHT * 4.0 * t * (1.0 - t)
+	lbl.position = pos
 
 ## AOE resolve helper — kicks off a sprite-based one-shot at every square in
 ## `squares`, with a small per-square ripple delay so the effect reads as
 ## radiating outward instead of all popping at once.
 func _play_aoe_resolve(tween: Tween, squares: Array, kind: String, floats: Array) -> void:
-    var frames: Array = SpriteFactory.aoe_resolve_frames(kind)
-    if frames.is_empty(): return
-    var per_frame := 0.06 if kind == "cannon" else 0.05
-    var total := per_frame * float(frames.size())
-    for i in squares.size():
-        var sq: int = int(squares[i])
-        var ripple: float = float(i) * 0.04
-        var fx := _create_fx_sprite(sq, frames)
-        floats.append(fx)
-        UiMotion.schedule_frame_swaps(tween, fx, frames, total, ripple)
-        ## Fade out after the last frame so the sprite doesn't linger.
-        tween.tween_property(fx, "modulate:a", 0.0, 0.10).set_delay(ripple + total - 0.05)
+	var frames: Array = SpriteFactory.aoe_resolve_frames(kind)
+	if frames.is_empty(): return
+	var per_frame := 0.06 if kind == "cannon" else 0.05
+	var total := per_frame * float(frames.size())
+	for i in squares.size():
+		var sq: int = int(squares[i])
+		var ripple: float = float(i) * 0.04
+		var fx := _create_fx_sprite(sq, frames)
+		floats.append(fx)
+		UiMotion.schedule_frame_swaps(tween, fx, frames, total, ripple)
+		## Fade out after the last frame so the sprite doesn't linger.
+		tween.tween_property(fx, "modulate:a", 0.0, 0.10).set_delay(ripple + total - 0.05)
 
 ## Lightning resolve helper — single-target, no ripple. Plays the
 ## prebuilt strike spritesheet and fades out.
 func _play_lightning_at(tween: Tween, sq: int, floats: Array) -> void:
-    var frames: Array = SpriteFactory.lightning_strike_frames()
-    if frames.is_empty(): return
-    var per_frame := 0.07
-    var total := per_frame * float(frames.size())
-    var fx := _create_fx_sprite(sq, frames)
-    floats.append(fx)
-    UiMotion.schedule_frame_swaps(tween, fx, frames, total, 0.0)
-    tween.tween_property(fx, "modulate:a", 0.0, 0.12).set_delay(total - 0.06)
+	var frames: Array = SpriteFactory.lightning_strike_frames()
+	if frames.is_empty(): return
+	var per_frame := 0.07
+	var total := per_frame * float(frames.size())
+	var fx := _create_fx_sprite(sq, frames)
+	floats.append(fx)
+	UiMotion.schedule_frame_swaps(tween, fx, frames, total, 0.0)
+	tween.tween_property(fx, "modulate:a", 0.0, 0.12).set_delay(total - 0.06)
 
 func _create_fx_label(glyph: String, sq: int, tint: Color) -> Label:
-    var lbl := Label.new()
-    lbl.text = glyph
-    lbl.size = Vector2(SQ_SIZE, SQ_SIZE)
-    lbl.position = _sq_to_pos(sq)
-    lbl.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
-    lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-    lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-    lbl.add_theme_font_size_override("font_size", 50)
-    lbl.modulate = tint
-    lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    anim_overlay.add_child(lbl)
-    return lbl
+	var lbl := Label.new()
+	lbl.text = glyph
+	lbl.size = Vector2(SQ_SIZE, SQ_SIZE)
+	lbl.position = _sq_to_pos(sq)
+	lbl.pivot_offset = Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.add_theme_font_size_override("font_size", 50)
+	lbl.modulate = tint
+	lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	anim_overlay.add_child(lbl)
+	return lbl
 
 ## Hide the static sprite at sq (so the floating sprite is the only visible
 ## copy during animation). Returns the TextureRect so the caller can restore it.
 func _hide_static_sprite(sq: int) -> TextureRect:
-    var btn: Button = squares[sq]
-    var sprite: TextureRect = btn.get_node("Sprite")
-    sprite.modulate = Color(1, 1, 1, 0)
-    return sprite
+	var btn: Button = squares[sq]
+	var sprite: TextureRect = btn.get_node("Sprite")
+	sprite.modulate = Color(1, 1, 1, 0)
+	return sprite
 
 ## The orchestrator. Called between state-update and _render. Awaits the
 ## composite Tween before returning so the caller can _render afterward.
 func _animate_events(old_state: GameState, events: Array) -> void:
-    var floats: Array = []          ## transient nodes we created
-    var hidden: Array = []          ## static Sprite TextureRects we made transparent
-    var floats_by_sq: Dictionary = {}   ## origin_sq -> TextureRect that tracks it
+	var floats: Array = []          ## transient nodes we created
+	var hidden: Array = []          ## static Sprite TextureRects we made transparent
+	var floats_by_sq: Dictionary = {}   ## origin_sq -> TextureRect that tracks it
 
-    ## Pass 1 — pre-build floating sprites for every piece that needs to
-    ## relocate (move, push, kill). This way later events (damage flashes)
-    ## can target the floating sprite instead of the static cell.
-    for ev in events:
-        var k = String(ev.get("kind", ""))
-        if k == "move" or k == "push":
-            var from_sq := int(ev["from"])
-            var p = old_state.board[from_sq]
-            if p == null: continue
-            hidden.append(_hide_static_sprite(from_sq))
-            var lbl := _create_floating_piece(p, from_sq)
-            floats.append(lbl)
-            floats_by_sq[from_sq] = lbl
-        elif k == "kill":
-            var sq := int(ev["sq"])
-            var p = old_state.board[sq]
-            if p == null: continue
-            hidden.append(_hide_static_sprite(sq))
-            var lbl := _create_floating_piece(p, sq)
-            floats.append(lbl)
-            floats_by_sq[sq] = lbl
+	## Pass 1 — pre-build floating sprites for every piece that needs to
+	## relocate (move, push, kill). This way later events (damage flashes)
+	## can target the floating sprite instead of the static cell.
+	for ev in events:
+		var k = String(ev.get("kind", ""))
+		if k == "move" or k == "push":
+			var from_sq := int(ev["from"])
+			var p = old_state.board[from_sq]
+			if p == null: continue
+			hidden.append(_hide_static_sprite(from_sq))
+			var lbl := _create_floating_piece(p, from_sq)
+			floats.append(lbl)
+			floats_by_sq[from_sq] = lbl
+		elif k == "kill":
+			var sq := int(ev["sq"])
+			var p = old_state.board[sq]
+			if p == null: continue
+			hidden.append(_hide_static_sprite(sq))
+			var lbl := _create_floating_piece(p, sq)
+			floats.append(lbl)
+			floats_by_sq[sq] = lbl
 
-    ## Detect whether any of this turn's move events is an attack — those get
-    ## a 3-phase anticipate/lunge/settle animation, with damage flashes and
-    ## push slides delayed to land at impact moment.
-    var has_attack := false
-    for ev in events:
-        if String(ev.get("kind", "")) == "move":
-            var to_sq := int(ev["to"])
-            if old_state.board[to_sq] != null:
-                has_attack = true
-                break
+	## Detect whether any of this turn's move events is an attack — those get
+	## a 3-phase anticipate/lunge/settle animation, with damage flashes and
+	## push slides delayed to land at impact moment.
+	var has_attack := false
+	for ev in events:
+		if String(ev.get("kind", "")) == "move":
+			var to_sq := int(ev["to"])
+			if old_state.board[to_sq] != null:
+				has_attack = true
+				break
 
-    var tween := create_tween().set_parallel(true)
-    var any := false
+	var tween := create_tween().set_parallel(true)
+	var any := false
 
-    for ev in events:
-        var k := String(ev.get("kind", ""))
-        if k == "move" or k == "push":
-            var from_sq := int(ev["from"])
-            var to_sq := int(ev["to"])
-            if not floats_by_sq.has(from_sq): continue
-            var lbl: TextureRect = floats_by_sq[from_sq]
-            var from_pos := _sq_to_pos(from_sq) + Vector2(4, 4)
-            var to_pos := _sq_to_pos(to_sq) + Vector2(4, 4)
-            var is_attack := (k == "move") and (old_state.board[to_sq] != null)
-            var mover = old_state.board[from_sq]
-            var def_id: String = mover.def_id if mover != null else ""
-            var color: int = mover.color if mover != null else 0
-            var jumps := def_id == "knight" or def_id == "alter_knight"
+	for ev in events:
+		var k := String(ev.get("kind", ""))
+		if k == "move" or k == "push":
+			var from_sq := int(ev["from"])
+			var to_sq := int(ev["to"])
+			if not floats_by_sq.has(from_sq): continue
+			var lbl: TextureRect = floats_by_sq[from_sq]
+			var from_pos := _sq_to_pos(from_sq) + Vector2(4, 4)
+			var to_pos := _sq_to_pos(to_sq) + Vector2(4, 4)
+			var is_attack := (k == "move") and (old_state.board[to_sq] != null)
+			var mover = old_state.board[from_sq]
+			var def_id: String = mover.def_id if mover != null else ""
+			var color: int = mover.color if mover != null else 0
+			var jumps := def_id == "knight" or def_id == "alter_knight"
 
-            if is_attack:
-                ## ANTICIPATE — small pull-back, opposite of the attack vector.
-                var dir := (to_pos - from_pos)
-                var dlen := dir.length()
-                var unit := dir / dlen if dlen > 0.001 else Vector2.ZERO
-                var anticipate_pos := from_pos - unit * 10.0
-                var overshoot_pos  := to_pos   + unit * 10.0
-                tween.tween_property(lbl, "position", anticipate_pos, T_ANTICIPATE) \
-                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-                ## LUNGE — fast, accelerating, slightly past the target square.
-                tween.tween_property(lbl, "position", overshoot_pos, T_LUNGE) \
-                    .set_delay(T_ANTICIPATE) \
-                    .set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
-                ## SETTLE — snap-back to actual target square.
-                tween.tween_property(lbl, "position", to_pos, T_SETTLE) \
-                    .set_delay(T_ANTICIPATE + T_LUNGE) \
-                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			if is_attack:
+				## ANTICIPATE — small pull-back, opposite of the attack vector.
+				var dir := (to_pos - from_pos)
+				var dlen := dir.length()
+				var unit := dir / dlen if dlen > 0.001 else Vector2.ZERO
+				var anticipate_pos := from_pos - unit * 10.0
+				var overshoot_pos  := to_pos   + unit * 10.0
+				tween.tween_property(lbl, "position", anticipate_pos, T_ANTICIPATE) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				## LUNGE — fast, accelerating, slightly past the target square.
+				tween.tween_property(lbl, "position", overshoot_pos, T_LUNGE) \
+					.set_delay(T_ANTICIPATE) \
+					.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
+				## SETTLE — snap-back to actual target square.
+				tween.tween_property(lbl, "position", to_pos, T_SETTLE) \
+					.set_delay(T_ANTICIPATE + T_LUNGE) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
-                ## Pose frames — alter knight uses the deliberate spear-thrust
-                ## "lunge" pose set; everyone else uses the snappy "attack" jab.
-                var attack_anim := "attack_lunge" if def_id == "alter_knight" else "attack"
-                _schedule_piece_anim(tween, lbl, def_id, color, attack_anim,
-                    T_ANTICIPATE + T_LUNGE + T_SETTLE, 0.0)
+				## Pose frames — alter knight uses the deliberate spear-thrust
+				## "lunge" pose set; everyone else uses the snappy "attack" jab.
+				var attack_anim := "attack_lunge" if def_id == "alter_knight" else "attack"
+				_schedule_piece_anim(tween, lbl, def_id, color, attack_anim,
+					T_ANTICIPATE + T_LUNGE + T_SETTLE, 0.0)
 
-                ## IMPACT BURST — sprite at target square; spawn pre-hidden,
-                ## scale up + spin + fade in/out. Pure Tween, no particles.
-                var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
-                floats.append(fx)
-                fx.scale = Vector2(0.25, 0.25)
-                fx.modulate.a = 0.0
-                tween.tween_property(fx, "modulate:a", 1.0, 0.05).set_delay(T_IMPACT)
-                tween.tween_property(fx, "scale", Vector2(2.6, 2.6), 0.22) \
-                    .set_delay(T_IMPACT) \
-                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-                tween.tween_property(fx, "modulate:a", 0.0, 0.18) \
-                    .set_delay(T_IMPACT + 0.10)
-                tween.tween_property(fx, "rotation", 0.65, 0.22).set_delay(T_IMPACT)
-            else:
-                ## Plain slide — non-attack move or chain push (which gets a
-                ## brief delay so it visually starts at impact moment).
-                var delay := T_IMPACT if (k == "push" and has_attack) else 0.0
-                var dur := ANIM_MOVE_DURATION
-                if k == "move" and jumps:
-                    ## Knight / alter knight non-capture move — parabolic arc
-                    ## layered on top of the move_jump pose animation.
-                    tween.tween_method(_set_knight_arc_pos.bind(lbl, from_pos, to_pos),
-                        0.0, 1.0, dur) \
-                        .set_delay(delay) \
-                        .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-                    _schedule_piece_anim(tween, lbl, def_id, color, "move_jump", dur, delay)
-                else:
-                    tween.tween_property(lbl, "position", to_pos, dur) \
-                        .set_delay(delay) \
-                        .set_trans(Tween.TRANS_BACK if k == "push" else Tween.TRANS_QUAD) \
-                        .set_ease(Tween.EASE_OUT)
-                    if k == "move":
-                        _schedule_piece_anim(tween, lbl, def_id, color, "move", dur, delay)
-            any = true
+				## IMPACT BURST — sprite at target square; spawn pre-hidden,
+				## scale up + spin + fade in/out. Pure Tween, no particles.
+				var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
+				floats.append(fx)
+				fx.scale = Vector2(0.25, 0.25)
+				fx.modulate.a = 0.0
+				tween.tween_property(fx, "modulate:a", 1.0, 0.05).set_delay(T_IMPACT)
+				tween.tween_property(fx, "scale", Vector2(2.6, 2.6), 0.22) \
+					.set_delay(T_IMPACT) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				tween.tween_property(fx, "modulate:a", 0.0, 0.18) \
+					.set_delay(T_IMPACT + 0.10)
+				tween.tween_property(fx, "rotation", 0.65, 0.22).set_delay(T_IMPACT)
+			else:
+				## Plain slide — non-attack move or chain push (which gets a
+				## brief delay so it visually starts at impact moment).
+				var delay := T_IMPACT if (k == "push" and has_attack) else 0.0
+				var dur := ANIM_MOVE_DURATION
+				if k == "move" and jumps:
+					## Knight / alter knight non-capture move — parabolic arc
+					## layered on top of the move_jump pose animation.
+					tween.tween_method(_set_knight_arc_pos.bind(lbl, from_pos, to_pos),
+						0.0, 1.0, dur) \
+						.set_delay(delay) \
+						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+					_schedule_piece_anim(tween, lbl, def_id, color, "move_jump", dur, delay)
+				else:
+					tween.tween_property(lbl, "position", to_pos, dur) \
+						.set_delay(delay) \
+						.set_trans(Tween.TRANS_BACK if k == "push" else Tween.TRANS_QUAD) \
+						.set_ease(Tween.EASE_OUT)
+					if k == "move":
+						_schedule_piece_anim(tween, lbl, def_id, color, "move", dur, delay)
+			any = true
 
-        elif k == "damage":
-            var sq := int(ev["sq"])
-            var target_lbl: TextureRect = floats_by_sq.get(sq, null)
-            var victim = old_state.board[sq]
-            if target_lbl == null:
-                ## Damaged piece isn't being moved — give it a floating clone
-                ## so we can flash and shake without touching the static cell.
-                if victim == null: continue
-                hidden.append(_hide_static_sprite(sq))
-                target_lbl = _create_floating_piece(victim, sq)
-                floats.append(target_lbl)
-            var delay: float = T_IMPACT if has_attack else 0.0
-            ## WHITEOUT then RED then back. The whiteout cue is the impact.
-            tween.tween_property(target_lbl, "modulate", Color(2.5, 2.5, 2.5), 0.04) \
-                .set_delay(delay)
-            tween.tween_property(target_lbl, "modulate", Color(1.7, 0.4, 0.4), 0.06) \
-                .set_delay(delay + 0.04)
-            tween.tween_property(target_lbl, "modulate", Color.WHITE, 0.10) \
-                .set_delay(delay + 0.10)
-            ## "hit" pose shake — small body offset cycle layered under the
-            ## color flash above.
-            if victim != null:
-                _schedule_piece_anim(tween, target_lbl, victim.def_id, victim.color,
-                    "hit", 0.18, delay)
-            any = true
+		elif k == "damage":
+			var sq := int(ev["sq"])
+			var target_lbl: TextureRect = floats_by_sq.get(sq, null)
+			var victim = old_state.board[sq]
+			if target_lbl == null:
+				## Damaged piece isn't being moved — give it a floating clone
+				## so we can flash and shake without touching the static cell.
+				if victim == null: continue
+				hidden.append(_hide_static_sprite(sq))
+				target_lbl = _create_floating_piece(victim, sq)
+				floats.append(target_lbl)
+			var delay: float = T_IMPACT if has_attack else 0.0
+			## WHITEOUT then RED then back. The whiteout cue is the impact.
+			tween.tween_property(target_lbl, "modulate", Color(2.5, 2.5, 2.5), 0.04) \
+				.set_delay(delay)
+			tween.tween_property(target_lbl, "modulate", Color(1.7, 0.4, 0.4), 0.06) \
+				.set_delay(delay + 0.04)
+			tween.tween_property(target_lbl, "modulate", Color.WHITE, 0.10) \
+				.set_delay(delay + 0.10)
+			## "hit" pose shake — small body offset cycle layered under the
+			## color flash above.
+			if victim != null:
+				_schedule_piece_anim(tween, target_lbl, victim.def_id, victim.color,
+					"hit", 0.18, delay)
+			any = true
 
-        elif k == "kill":
-            var sq := int(ev["sq"])
-            if floats_by_sq.has(sq):
-                var lbl: TextureRect = floats_by_sq[sq]
-                var delay: float = T_IMPACT if has_attack else 0.0
-                tween.tween_property(lbl, "scale", Vector2(0.25, 0.25),
-                    ANIM_KILL_DURATION).set_delay(delay)
-                tween.tween_property(lbl, "modulate:a", 0.0,
-                    ANIM_KILL_DURATION).set_delay(delay)
-                var victim = old_state.board[sq]
-                if victim != null:
-                    _schedule_piece_anim(tween, lbl, victim.def_id, victim.color,
-                        "death", ANIM_KILL_DURATION, delay)
-                any = true
+		elif k == "kill":
+			var sq := int(ev["sq"])
+			if floats_by_sq.has(sq):
+				var lbl: TextureRect = floats_by_sq[sq]
+				var delay: float = T_IMPACT if has_attack else 0.0
+				tween.tween_property(lbl, "scale", Vector2(0.25, 0.25),
+					ANIM_KILL_DURATION).set_delay(delay)
+				tween.tween_property(lbl, "modulate:a", 0.0,
+					ANIM_KILL_DURATION).set_delay(delay)
+				var victim = old_state.board[sq]
+				if victim != null:
+					_schedule_piece_anim(tween, lbl, victim.def_id, victim.color,
+						"death", ANIM_KILL_DURATION, delay)
+				any = true
 
-        elif k == "lightning":
-            _play_lightning_at(tween, int(ev["target"]), floats)
-            any = true
+		elif k == "lightning":
+			_play_lightning_at(tween, int(ev["target"]), floats)
+			any = true
 
-        elif k == "cannonResolved":
-            var sqs: Array = []
-            for raw in ev.get("target", []): sqs.append(int(raw))
-            _play_aoe_resolve(tween, sqs, "cannon", floats)
-            any = true
+		elif k == "cannonResolved":
+			var sqs: Array = []
+			for raw in ev.get("target", []): sqs.append(int(raw))
+			_play_aoe_resolve(tween, sqs, "cannon", floats)
+			any = true
 
-        elif k == "debrisResolved":
-            var sqs: Array = []
-            for raw in ev.get("target", []): sqs.append(int(raw))
-            _play_aoe_resolve(tween, sqs, "debris", floats)
-            any = true
+		elif k == "debrisResolved":
+			var sqs: Array = []
+			for raw in ev.get("target", []): sqs.append(int(raw))
+			_play_aoe_resolve(tween, sqs, "debris", floats)
+			any = true
 
-        elif k == "debrisQueued":
-            ## Brief "incoming" pulse on the freshly telegraphed pair — a
-            ## quick scale-bounce so the player notices the new threat
-            ## without missing it among existing warnings.
-            for raw in ev.get("target", []):
-                var sq := int(raw)
-                var ping := _create_fx_label("◌", sq, Color(1.0, 0.7, 0.3))
-                floats.append(ping)
-                ping.scale = Vector2(0.4, 0.4)
-                tween.tween_property(ping, "scale", Vector2(2.0, 2.0), 0.25) \
-                    .set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-                tween.tween_property(ping, "modulate:a", 0.0, 0.22) \
-                    .set_delay(0.10)
-            any = true
+		elif k == "debrisQueued":
+			## Brief "incoming" pulse on the freshly telegraphed pair — a
+			## quick scale-bounce so the player notices the new threat
+			## without missing it among existing warnings.
+			for raw in ev.get("target", []):
+				var sq := int(raw)
+				var ping := _create_fx_label("◌", sq, Color(1.0, 0.7, 0.3))
+				floats.append(ping)
+				ping.scale = Vector2(0.4, 0.4)
+				tween.tween_property(ping, "scale", Vector2(2.0, 2.0), 0.25) \
+					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				tween.tween_property(ping, "modulate:a", 0.0, 0.22) \
+					.set_delay(0.10)
+			any = true
 
-    if any:
-        await tween.finished
-    else:
-        await get_tree().process_frame
+	if any:
+		await tween.finished
+	else:
+		await get_tree().process_frame
 
-    ## Cleanup — the static board (rendered after this returns) will show
-    ## the new state with un-hidden sprites.
-    for f in floats:
-        if is_instance_valid(f): f.queue_free()
-    for g in hidden:
-        if is_instance_valid(g): g.modulate = Color.WHITE
+	## Cleanup — the static board (rendered after this returns) will show
+	## the new state with un-hidden sprites.
+	for f in floats:
+		if is_instance_valid(f): f.queue_free()
+	for g in hidden:
+		if is_instance_valid(g): g.modulate = Color.WHITE
 
 # ============================================================================
 # PROMOTION PICKER
 # ============================================================================
 
-func _show_promo_picker(matches: Array) -> void:
-    promo_panel.visible = true
-    for c in promo_buttons.get_children(): c.queue_free()
-    for m in matches:
-        var promo_id := String(m["promo"])
-        var btn := _make_styled_button("")
-        btn.custom_minimum_size = Vector2(40, 40)
-        btn.tooltip_text = state.config.pieces[promo_id].display_name
-        var icon := TextureRect.new()
-        icon.texture = SpriteFactory.piece_texture(promo_id, state.side)
-        icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-        icon.offset_left = 2; icon.offset_top = 2
-        icon.offset_right = -2; icon.offset_bottom = -2
-        icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-        icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-        icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
-        icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-        btn.add_child(icon)
-        btn.pressed.connect(_on_promo_chosen.bind(m))
-        promo_buttons.add_child(btn)
+## Picker shows a vertical column of piece buttons (Q on top, then R/B/N)
+## anchored next to the promoting square. The board is dimmed during the
+## choice so the user reads "the game is waiting on me." Q/R/B/N keyboard
+## shortcuts are wired in _unhandled_input.
+func _show_promo_picker(matches: Array, promo_sq: int) -> void:
+	pending_promo_sq = promo_sq
+	promo_panel.visible = true
+	board_dim.visible = true
+	for c in promo_buttons.get_children(): c.queue_free()
+
+	## Sort: Q first, then R, B, N. Anything not in this set goes to the
+	## end (e.g. custom variant promotions).
+	var ordering := {"queen": 0, "rook": 1, "bishop": 2, "knight": 3}
+	var sorted_matches := matches.duplicate()
+	sorted_matches.sort_custom(func(a, b):
+		var ra: int = int(ordering.get(String(a["promo"]), 99))
+		var rb: int = int(ordering.get(String(b["promo"]), 99))
+		return ra < rb)
+
+	for m in sorted_matches:
+		var promo_id := String(m["promo"])
+		var btn := _make_styled_button("")
+		btn.custom_minimum_size = Vector2(56, 56)
+		btn.tooltip_text = state.config.pieces[promo_id].display_name
+		var icon := TextureRect.new()
+		icon.texture = SpriteFactory.piece_texture(promo_id, state.side)
+		icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		icon.offset_left = 4; icon.offset_top = 4
+		icon.offset_right = -4; icon.offset_bottom = -4
+		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		icon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		btn.add_child(icon)
+		btn.pressed.connect(_on_promo_chosen.bind(m))
+		promo_buttons.add_child(btn)
+
+	## Anchor the panel next to the promoting square. We position relative
+	## to board_holder's screen-space rect, then clamp to the viewport so
+	## edge-file promotions don't get clipped. White promos go ABOVE the
+	## promoting square (since the square is near the top of the board for
+	## white); black promos go BELOW it for the same reason.
+	await get_tree().process_frame   ## let the panel measure itself
+	if not is_instance_valid(promo_panel) or not pending_promo or pending_promo_sq < 0:
+		return
+	var sq_pos := _sq_to_pos(pending_promo_sq)
+	var board_origin := board_holder.global_position
+	var panel_size := promo_panel.size
+	var anchor_x := board_origin.x + sq_pos.x + (SQ_SIZE - panel_size.x) * 0.5
+	var anchor_y: float
+	if state.side == Rules.WHITE:
+		## White promos to rank 8 (visually top of board) — fan downward
+		## so the column is visible below the promoting square.
+		anchor_y = board_origin.y + sq_pos.y + SQ_SIZE + 4
+	else:
+		## Black promos to rank 1 (visually bottom of board) — fan upward.
+		anchor_y = board_origin.y + sq_pos.y - panel_size.y - 4
+	var vp_size := get_viewport_rect().size
+	anchor_x = clamp(anchor_x, 4.0, vp_size.x - panel_size.x - 4.0)
+	anchor_y = clamp(anchor_y, 4.0, vp_size.y - panel_size.y - 4.0)
+	promo_panel.global_position = Vector2(anchor_x, anchor_y)
 
 func _on_promo_chosen(m: Dictionary) -> void:
-    pending_promo = []
-    promo_panel.visible = false
-    _play_move(m)
+	pending_promo = []
+	pending_promo_sq = -1
+	promo_panel.visible = false
+	board_dim.visible = false
+	_play_move(m)
+
+func _cancel_promo() -> void:
+	pending_promo = []
+	pending_promo_sq = -1
+	promo_panel.visible = false
+	board_dim.visible = false
+	selected = -1
+	legal_for_selected = []
+	mode = "select_piece"
+	_render()
+
+## Keyboard input. Q/R/B/N pick the matching promotion when a picker is
+## up; Esc cancels. Falls through otherwise — game-over and other states
+## are still mouse-driven.
+func _unhandled_input(event: InputEvent) -> void:
+	if pending_promo.is_empty(): return
+	if not (event is InputEventKey): return
+	var key_ev: InputEventKey = event
+	if not key_ev.pressed or key_ev.echo: return
+	var key := key_ev.keycode
+	var key_to_id := {
+		KEY_Q: "queen",
+		KEY_R: "rook",
+		KEY_B: "bishop",
+		KEY_N: "knight",
+	}
+	if key == KEY_ESCAPE:
+		_cancel_promo()
+		get_viewport().set_input_as_handled()
+		return
+	if not key_to_id.has(key): return
+	var target_id: String = key_to_id[key]
+	for m in pending_promo:
+		if String(m.get("promo", "")) == target_id:
+			_on_promo_chosen(m)
+			get_viewport().set_input_as_handled()
+			return
