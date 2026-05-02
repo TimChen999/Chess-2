@@ -2,28 +2,28 @@
 
 This project is configured to give Claude Code two kinds of "senses" beyond reading source files:
 
-1. **Visual review** (installed) — Claude can open the running game in a real browser, take screenshots, click through UI, read the DOM/console, and critique what it sees.
-2. **Sprite generation** (planned) — Claude can generate pixel-art sprites directly via the PixelLab API, using the existing game as visual context.
+1. **Visual review** (Playwright MCP — installed, currently dormant) — runs a headless Chromium that Claude can drive, screenshot, and inspect. Useless against the native Godot build; activates once an HTML5 export exists.
+2. **Sprite generation** (PixelLab MCP — planned) — Claude generates pixel-art sprites directly via the PixelLab API and they slot into the existing [generate_sprites.py](generate_sprites.py) pipeline.
 
-The combination closes a loop the developer otherwise has to run by hand: *generate sprite → drop into game → see how it looks in context → regenerate*.
+The active game lives in [godot/](godot/). Anything below that talks about visual review only becomes useful after `Project → Export → Web` produces a runnable HTML5 build.
 
 ---
 
-## 1. Installed: Playwright MCP (visual review)
+## 1. Installed: Playwright MCP
 
 ### What it is
 
-[Playwright MCP](https://github.com/microsoft/playwright-mcp) is a Model Context Protocol server that exposes Chromium browser automation as tools Claude can call mid-conversation. When asked something like *"open the game and tell me what's wrong with the menu"*, Claude can navigate, screenshot, and respond — all in one turn — without the user manually capturing or pasting images.
+[Playwright MCP](https://github.com/microsoft/playwright-mcp) is a Model Context Protocol server that exposes Chromium browser automation as tools Claude can call mid-conversation. Once a target URL exists, Claude can navigate, screenshot, click, read the DOM, and inspect the console — all in one turn.
 
 ### How it's configured
 
 | File | Role |
 |---|---|
-| [.mcp.json](.mcp.json) | Declares the `playwright` MCP server, project-scoped (committed to git so any machine that clones the repo gets the same setup) |
-| [.claude/settings.json](.claude/settings.json) | Pre-approves the server via `enabledMcpjsonServers` so it auto-starts without a permission prompt |
-| `C:\Users\timch\AppData\Local\ms-playwright\` | Cached Chromium binaries (~400MB, machine-local, shared across all Playwright projects) |
+| [.mcp.json](.mcp.json) | Declares the `playwright` MCP server, project-scoped (committed) |
+| `.claude/settings.json` | Pre-approves the server via `enabledMcpjsonServers` so it auto-starts (gitignored — machine-specific) |
+| `C:\Users\timch\AppData\Local\ms-playwright\` | Cached Chromium binaries (~500MB, machine-local, shared across all Playwright projects) |
 
-The current `.mcp.json` invocation:
+The `.mcp.json` invocation:
 
 ```json
 {
@@ -38,61 +38,52 @@ The current `.mcp.json` invocation:
 
 Flags:
 - `--headless` — runs Chromium without a visible window. Faster, no popups. Screenshots still work normally.
-- `--browser chromium` — uses the bundled Chromium (not your system Chrome).
-- `--allow-unrestricted-file-access` — lets the browser load `file:///c:/Users/timch/Documents/ML-Sandbox/Chess-2/index.html` directly, so no local server is needed for visual review.
+- `--browser chromium` — uses the bundled Chromium, not your system Chrome.
+- `--allow-unrestricted-file-access` — lets the browser load `file://` URLs directly, so no local server is needed once an export exists.
 
-### Available browser tools
+### Activating the visual loop
 
-Once Claude Code starts a session in this repo, ~25 tools become available, prefixed `mcp__playwright__`. The most useful for this project:
+Playwright is currently dormant — there's no web target. Two paths to activate:
+
+**(a) Export Godot to HTML5/WebAssembly** (recommended)
+1. Open the Godot editor on [godot/project.godot](godot/project.godot).
+2. `Project → Export → Web` (install the Web export template if prompted — Godot offers it automatically).
+3. Pick an output dir, e.g. `godot/export/web/`. Godot produces `index.html`, `.wasm`, `.pck`, `.js`.
+4. Ask Claude: *"Open `godot/export/web/index.html` and screenshot the main menu."* Playwright will navigate the file:// URL and the loop is live.
+5. Re-export after significant visual changes. Until then, screenshots match the export, not the editor state.
+
+**(b) One-off screenshots from the Godot editor or runtime**
+Drop a PNG into chat (drag-and-drop or path reference). Claude reads it via the Read tool. No MCP needed. Fine for occasional design checks; doesn't enable autonomous loops.
+
+**(c) Godot-side debug screenshotter**
+Add a script in your Godot project that calls `get_viewport().get_texture().get_image().save_png("user://latest.png")` on a hotkey. Claude `Read`s the file when needed. Works without a Web export but requires Godot to be running.
+
+### Available browser tools (post-activation)
+
+Once Claude has a target URL, ~25 tools become available, prefixed `mcp__playwright__`. The most useful for this project:
 
 | Tool | What Claude does with it |
 |---|---|
-| `browser_navigate` | Open `index.html` or any URL |
-| `browser_take_screenshot` | Capture the full page or a specific element by selector |
+| `browser_navigate` | Open the exported `index.html` or any URL |
+| `browser_take_screenshot` | Capture full page or a specific element by selector |
 | `browser_snapshot` | Read the accessibility tree (semantic, faster than a screenshot for layout checks) |
-| `browser_click` | Click buttons / pieces / menu items |
-| `browser_evaluate` | Run arbitrary JS in the page (inspect game state, force a board position) |
-| `browser_console_messages` | Read console errors/warnings |
+| `browser_click` | Click buttons, pieces, menu items — drives the game to specific states |
+| `browser_evaluate` | Run arbitrary JS in the page (inspect engine state via the Godot Web export's window globals) |
+| `browser_console_messages` | Read console errors/warnings from Godot's runtime |
 | `browser_resize` | Test layouts at different viewport sizes |
 | `browser_wait_for` | Wait for animations/state changes before screenshotting |
 
-### How to use it (prompt patterns)
+### Caveats with Godot HTML5
 
-You don't call the tools directly — you ask in natural language and Claude chains the calls.
-
-**Single-shot review:**
-> "Open `index.html` and screenshot the main menu. Tell me three things that look weak."
-
-**State-driven check:**
-> "Load the game, click 'Local 2-player', start a match on the Moon stage, and screenshot the board after move 1.e4."
-
-**Sprite-by-sprite audit:**
-> "Open the customize screen and screenshot each piece variant at 2x resolution. List pixel-alignment or silhouette issues."
-
-**Iterate-until-good:**
-> "Screenshot the title screen, identify the weakest visual element, make one CSS change to improve it, screenshot again. Repeat 3 times."
-
-**Combined visual + console:**
-> "Start a match on the Moon stage and report any console errors alongside what's on screen."
-
-### When to use it vs. dropping a screenshot manually
-
-| Use Playwright MCP when... | Just paste a screenshot when... |
-|---|---|
-| You want Claude to drive the game to a specific state | You already have the exact frame you want critiqued |
-| You're iterating many rounds (autonomous loops) | One-off design check |
-| You want console + DOM + visual combined | Visual-only is enough |
-| You're AFK and want a `/loop` to refine visuals | Quick targeted feedback |
+- The Godot Web build is a single canvas. Element-targeted screenshots (`target: "selector"`) won't reach into the game — everything inside the canvas is opaque pixels to the DOM. Workaround: full-canvas screenshots only, plus crop in post if needed.
+- `browser_click` on canvas coordinates works (Playwright passes pixel-space coords). Driving menus requires knowing pixel positions, not selectors.
+- Console output from GDScript `print()` shows up in `browser_console_messages` once the export is loaded.
 
 ---
 
 ## 2. Planned: PixelLab MCP (sprite generation)
 
-> **Status:** not installed yet. Requires an API key from [pixellab.ai](https://www.pixellab.ai). This section documents the intended setup and integration plan.
-
-### What it is
-
-[PixelLab MCP](https://github.com/pixellab-code/pixellab-mcp) is a sprite generation service purpose-built for game pixel art. Unlike generic image generators (DALL-E, Flux, SDXL), it understands grid alignment, palette discipline, silhouette readability, and animation frame consistency — the things that matter for actual game sprites.
+> **Status:** not installed yet. Requires an API key from [pixellab.ai](https://www.pixellab.ai). This section documents the intended setup and integration plan for the Godot sprite pipeline.
 
 ### Why this over alternatives
 
@@ -122,48 +113,38 @@ You don't call the tools directly — you ask in natural language and Claude cha
      }
    }
    ```
-3. Set the env var in PowerShell: `$env:PIXELLAB_API_KEY = "your_key_here"` (or add it to your user environment via System Properties so it persists).
+3. Set the env var in PowerShell: `$env:PIXELLAB_API_KEY = "your_key_here"` (or add it via System Properties → Environment Variables to persist).
 4. Pre-approve in `.claude/settings.json`: `"enabledMcpjsonServers": ["playwright", "pixellab"]`.
 5. Restart Claude Code. Tools become available as `mcp__pixellab__*`.
 
-### Expected tools
-
-PixelLab's MCP exposes generation primitives. Likely names (verify against the GitHub repo when installing):
-
-- `generate_image` — single sprite from a text prompt
-- `generate_with_reference` — sprite that matches the style of an input image (the consistency primitive)
-- `animate_sprite` — generate idle/walk/etc. animation frames for an existing sprite
-- `generate_rotation` — 4 or 8 directional views of a character
-- `generate_tileset` — seamless tileable terrain
-
 ### How it integrates with `generate_sprites.py`
 
-The repo already has [generate_sprites.py](generate_sprites.py), which does **procedural** sprite generation: deterministic, free, but stylistically constrained. PixelLab and procedural are not competing — they fit together.
+[generate_sprites.py](generate_sprites.py) already produces the Godot sprite atlas under [godot/assets/sprites/](godot/assets/sprites/) — pieces (`pawn`, `rook`, `knight`, `bishop`, `queen`, `king`, plus variants `bandit_pawn`, `assassin_bishop`, `alter_knight`), animation strips (`static`, `move`, `attack`, `hit`, `death`), and FX (`cannon_resolve`, `debris_fall`, `lightning_strike`).
 
-Three integration patterns, in increasing complexity:
+It's currently fully procedural. PixelLab and procedural fit together rather than competing. Three integration patterns, in increasing complexity:
 
 #### Pattern A: PixelLab replaces `generate_sprites.py` entirely
-- PixelLab generates 12 finished piece PNGs into `assets/sprites/` (or wherever the JS loads from).
+- PixelLab generates 12 finished piece PNGs into `godot/assets/sprites/anim/pieces/...`.
 - The procedural script is retired.
-- **Tradeoff:** lose all parametric variant control (recolor, hue-shift, outline tweaks, spritesheet packing). Every variant requires a fresh API call.
+- **Tradeoff:** lose all parametric variant control (recolor, hue-shift, outline tweaks, animation strip packing). Every variant requires a fresh API call.
 
-#### Pattern B: PixelLab generates *base* sprites, `generate_sprites.py` does variants ← **recommended**
-- PixelLab generates **one polished base sprite per piece type** (6 sprites: pawn, knight, bishop, rook, queen, king).
+#### Pattern B: PixelLab generates *base* sprites, `generate_sprites.py` does variants and animation packing ← **recommended**
+- PixelLab generates a polished **base static sprite per piece type** (6 sprites: pawn, knight, bishop, rook, queen, king).
 - `generate_sprites.py` is repurposed from "create from scratch" to "transform": it loads the base PNGs and produces:
-  - White/black team recolors
+  - White/black team recolors (currently driven by the `PALETTES` dict)
   - Variant hue-shifts (per [PIECE-VARIANTS.md](PIECE-VARIANTS.md))
   - Outline / shadow passes
-  - Final spritesheet packing
-- **Tradeoff:** best of both — AI gives the artistic look that's hard to write rules for, code gives the cheap deterministic multiplication.
+  - Frame-strip packing for `move`, `attack`, `hit`, `death` animations
+- **Tradeoff:** best of both — AI gives the artistic look that's hard to write rules for, code gives cheap deterministic multiplication.
 - **Cost:** ~6 API calls for the entire base set, then variants are free forever.
 
 #### Pattern C: AI as reference, procedural at runtime
 - Use PixelLab to generate concept art only.
 - Manually translate the look back into procedural drawing rules in `generate_sprites.py`.
-- **Tradeoff:** most labor-intensive, but builds remain fully deterministic with no PNG assets shipped.
-- Only worth it if asset deterministic-ness is a hard requirement.
+- **Tradeoff:** most labor-intensive, but the build remains fully deterministic with no PNG assets shipped beyond what code emits.
+- Only worth it if asset determinism is a hard requirement.
 
-### The closed loop with Playwright
+### The closed loop with Playwright (post Godot export)
 
 The combined workflow is the actual reason both MCPs are useful together:
 
@@ -174,69 +155,59 @@ The combined workflow is the actual reason both MCPs are useful together:
 │      (mcp__pixellab__generate_image)                        │
 │              │                                              │
 │              ▼                                              │
-│   2. Claude saves it to assets/sprites/knight.png           │
+│   2. Claude saves it to godot/assets/sprites/...            │
 │              │                                              │
 │              ▼                                              │
-│   3. Playwright MCP loads index.html with the new sprite    │
-│      (mcp__playwright__browser_navigate)                    │
+│   3. python generate_sprites.py rebuilds variants/strips    │
 │              │                                              │
 │              ▼                                              │
-│   4. Playwright screenshots the piece in actual game        │
-│      context — on the board, against both light and dark    │
-│      squares, alongside the other pieces                    │
+│   4. (Manual) Re-export Godot to godot/export/web/          │
+│      — or skip and rely on a debug screenshotter            │
+│              │                                              │
+│              ▼                                              │
+│   5. Playwright loads the exported index.html and           │
+│      screenshots the board in actual game context —         │
+│      against light and dark squares, alongside siblings     │
 │      (mcp__playwright__browser_take_screenshot)             │
 │              │                                              │
 │              ▼                                              │
-│   5. Claude critiques: silhouette, palette match,           │
-│      readability at game scale, consistency with siblings   │
+│   6. Claude critiques: silhouette, palette match,           │
+│      readability at game scale, consistency                 │
 │              │                                              │
 │              ▼                                              │
-│   6. Claude regenerates with adjusted prompt → loop         │
+│   7. Claude regenerates with adjusted prompt → loop         │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Neither MCP alone produces this result. PixelLab in isolation only knows "looks good as a 256×256 preview." Only Playwright tells the loop "looks good on the chessboard at runtime."
-
-### Sample prompts (post-install)
-
-**Initial generation:**
-> "Generate a base white queen sprite at 64×64 in a clean retro pixel-art style with strong silhouette. Use it as the style reference and generate the other 5 piece types matching it. Save to `assets/sprites/base/`."
-
-**Generate + verify in-game:**
-> "Generate a new knight sprite. Save it as `assets/sprites/base/knight.png`, run `python generate_sprites.py` to rebuild the spritesheet, then open `index.html` and screenshot the board with knights placed. Tell me if the new knight reads well against both square colors."
-
-**Variant tuning:**
-> "The shadow variant from PIECE-VARIANTS.md doesn't look distinct enough from the base. Generate three alternative shadow-style references via PixelLab, screenshot each rendered in-game, and recommend which works best."
+The re-export step (4) is the friction. Until a Godot CLI export script lives in this repo (e.g. `godot --headless --export-release "Web" godot/export/web/index.html`), step 4 is manual. Once that's automated, the loop runs end-to-end without intervention.
 
 ---
 
 ## 3. Configuration reference
 
-### Files involved
-
 | File | Committed? | Purpose |
 |---|---|---|
 | [.mcp.json](.mcp.json) | yes | Project-scoped MCP server declarations |
-| [.claude/settings.json](.claude/settings.json) | no (in `.gitignore` because it has machine-specific paths) | Pre-approves MCP servers, allows specific Bash commands without prompting |
+| `.claude/settings.json` | no (`.claude/` is in `.gitignore` because it has machine-specific paths) | Pre-approves MCP servers, allows specific Bash commands without prompting |
 | `.claude/settings.local.json` | no | Personal overrides — never commit |
 
 ### Adding a new MCP server
 
 1. Add an entry under `mcpServers` in `.mcp.json`.
-2. Add the server name to `enabledMcpjsonServers` in `.claude/settings.json` (otherwise Claude prompts for permission on session start).
+2. Add the server name to `enabledMcpjsonServers` in `.claude/settings.json`.
 3. Restart Claude Code so it loads the new server.
 
 ### Removing Playwright
 
 1. Delete the `playwright` entry from `.mcp.json`.
-2. Remove `"playwright"` from `enabledMcpjsonServers` in `.claude/settings.json`.
-3. Optional: delete `C:\Users\timch\AppData\Local\ms-playwright\` to reclaim disk space (~400MB), or run `npx playwright uninstall --all`.
+2. Remove `"playwright"` from `enabledMcpjsonServers`.
+3. Optional: delete `C:\Users\timch\AppData\Local\ms-playwright\` to reclaim ~500MB, or run `npx playwright uninstall --all`.
 
 ---
 
 ## 4. Cost notes
 
-- **Playwright**: zero recurring cost. One-time ~400MB disk + bandwidth for Chromium. No API.
+- **Playwright**: zero recurring cost. One-time ~500MB disk + bandwidth for Chromium. No API.
 - **PixelLab**: pay-per-use credits (cents per sprite). For the chess piece set, expect single-digit dollars to land a polished base set, then $0 forever for procedural variants under Pattern B.
 - **Tier 2 upgrade (Replicate + LoRA)**: ~$15 one-time to train a custom LoRA on hand-curated reference sprites if PixelLab can't hit the exact aesthetic. Would replace PixelLab calls with Replicate calls in the same MCP slot.

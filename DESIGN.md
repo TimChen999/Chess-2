@@ -1,8 +1,8 @@
 # Chess Engine — Design Notes
 
-A reference for the rules-engine design used in `index.html`, plus the
-architectural directions for variants (custom movesets, multi-move turns,
-richer presentation).
+A reference for the rules-engine design used in the Godot implementation,
+plus the architectural directions for variants (custom movesets,
+multi-move turns, richer presentation).
 
 ---
 

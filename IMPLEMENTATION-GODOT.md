@@ -746,7 +746,7 @@ on Square click(sq):
         deselect
 ```
 
-Match the same lookup pattern as [index.html](index.html), check point #5.
+Use a shared selection-state lookup keyed by square index; see point #5.
 
 ### 12.2 Animations
 
@@ -920,9 +920,9 @@ Build in this order to keep each step verifiable:
 
 ## 17. Common pitfalls / things to verify early
 
-- **Square indexing.** Same convention as [index.html](index.html):
-  `sq = rank * 8 + file`, rank 0 = white's back rank. Renderer flips so
-  white sits at the bottom on screen. Confirm with a marker piece on a1.
+- **Square indexing.** `sq = rank * 8 + file`, rank 0 = white's back
+  rank. Renderer flips so white sits at the bottom on screen. Confirm
+  with a marker piece on a1.
 - **Push-direction inversion.** White pieces push toward rank 0; black
   toward rank 7. A common bug is pushing the *attacker's* direction
   instead of the *target's*. Test: queen-on-knight push leaves the
