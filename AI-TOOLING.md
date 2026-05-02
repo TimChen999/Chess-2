@@ -2,10 +2,10 @@
 
 This project is configured to give Claude Code two kinds of "senses" beyond reading source files:
 
-1. **Visual review** (Playwright MCP — installed, currently dormant) — runs a headless Chromium that Claude can drive, screenshot, and inspect. Useless against the native Godot build; activates once an HTML5 export exists.
-2. **Sprite generation** (PixelLab MCP — planned) — Claude generates pixel-art sprites directly via the PixelLab API and they slot into the existing [generate_sprites.py](generate_sprites.py) pipeline.
+1. **Visual review** (Playwright MCP — installed, currently dormant) — runs a headless Chromium that Claude can drive, screenshot, and inspect. Useless against the native Godot build; activates once an HTML5 export exists. Configured below.
+2. **Sprite generation** (procedural PIL drawer + PixelLab Python SDK) — all sprite-design code and docs live under [tools/sprites/](tools/sprites/). The full 18-piece chess suite has been generated; outputs live at [godot/assets/sprites/anim/pieces/](godot/assets/sprites/anim/pieces/). See [tools/sprites/README.md](tools/sprites/README.md) for the full pipeline, lessons learned, and regen instructions.
 
-The active game lives in [godot/](godot/). Anything below that talks about visual review only becomes useful after `Project → Export → Web` produces a runnable HTML5 build.
+The active game lives in [godot/](godot/). The visual-review tooling only becomes useful after `Project → Export → Web` produces a runnable HTML5 build.
 
 ---
 
@@ -81,106 +81,9 @@ Once Claude has a target URL, ~25 tools become available, prefixed `mcp__playwri
 
 ---
 
-## 2. Planned: PixelLab MCP (sprite generation)
+## 2. Sprite generation
 
-> **Status:** not installed yet. Requires an API key from [pixellab.ai](https://www.pixellab.ai). This section documents the intended setup and integration plan for the Godot sprite pipeline.
-
-### Why this over alternatives
-
-| Tool | Verdict for chess pieces |
-|---|---|
-| **PixelLab** | Purpose-built for game sprites, official MCP, handles style consistency across pieces natively. **Recommended start.** |
-| **Retro Diffusion** (via Replicate) | Excellent pixel-art models, no native MCP — needs a Python wrapper. Best if PixelLab can't hit the look. |
-| **Scenario.com** | Has MCP, broader (3D/audio/video too), pay-as-you-go. Overkill for chess. |
-| **OpenAI DALL-E / Flux / SDXL** | Generic image gen. Produces "pixel-styled" art that breaks at small sprite sizes. Avoid. |
-| **Local ComfyUI + LoRAs** | Free after setup, full control, heavy install. Worth it only for 100+ assets long-term. |
-
-### Setup steps (when ready)
-
-1. Sign up at [pixellab.ai](https://www.pixellab.ai), grab an API key.
-2. Add to `.mcp.json` next to `playwright`:
-   ```json
-   {
-     "mcpServers": {
-       "playwright": { ... existing ... },
-       "pixellab": {
-         "command": "npx",
-         "args": ["-y", "@pixellab/mcp@latest"],
-         "env": {
-           "PIXELLAB_API_KEY": "${env:PIXELLAB_API_KEY}"
-         }
-       }
-     }
-   }
-   ```
-3. Set the env var in PowerShell: `$env:PIXELLAB_API_KEY = "your_key_here"` (or add it via System Properties → Environment Variables to persist).
-4. Pre-approve in `.claude/settings.json`: `"enabledMcpjsonServers": ["playwright", "pixellab"]`.
-5. Restart Claude Code. Tools become available as `mcp__pixellab__*`.
-
-### How it integrates with `generate_sprites.py`
-
-[generate_sprites.py](generate_sprites.py) already produces the Godot sprite atlas under [godot/assets/sprites/](godot/assets/sprites/) — pieces (`pawn`, `rook`, `knight`, `bishop`, `queen`, `king`, plus variants `bandit_pawn`, `assassin_bishop`, `alter_knight`), animation strips (`static`, `move`, `attack`, `hit`, `death`), and FX (`cannon_resolve`, `debris_fall`, `lightning_strike`).
-
-It's currently fully procedural. PixelLab and procedural fit together rather than competing. Three integration patterns, in increasing complexity:
-
-#### Pattern A: PixelLab replaces `generate_sprites.py` entirely
-- PixelLab generates 12 finished piece PNGs into `godot/assets/sprites/anim/pieces/...`.
-- The procedural script is retired.
-- **Tradeoff:** lose all parametric variant control (recolor, hue-shift, outline tweaks, animation strip packing). Every variant requires a fresh API call.
-
-#### Pattern B: PixelLab generates *base* sprites, `generate_sprites.py` does variants and animation packing ← **recommended**
-- PixelLab generates a polished **base static sprite per piece type** (6 sprites: pawn, knight, bishop, rook, queen, king).
-- `generate_sprites.py` is repurposed from "create from scratch" to "transform": it loads the base PNGs and produces:
-  - White/black team recolors (currently driven by the `PALETTES` dict)
-  - Variant hue-shifts (per [PIECE-VARIANTS.md](PIECE-VARIANTS.md))
-  - Outline / shadow passes
-  - Frame-strip packing for `move`, `attack`, `hit`, `death` animations
-- **Tradeoff:** best of both — AI gives the artistic look that's hard to write rules for, code gives cheap deterministic multiplication.
-- **Cost:** ~6 API calls for the entire base set, then variants are free forever.
-
-#### Pattern C: AI as reference, procedural at runtime
-- Use PixelLab to generate concept art only.
-- Manually translate the look back into procedural drawing rules in `generate_sprites.py`.
-- **Tradeoff:** most labor-intensive, but the build remains fully deterministic with no PNG assets shipped beyond what code emits.
-- Only worth it if asset determinism is a hard requirement.
-
-### The closed loop with Playwright (post Godot export)
-
-The combined workflow is the actual reason both MCPs are useful together:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│   1. PixelLab MCP generates a sprite                        │
-│      (mcp__pixellab__generate_image)                        │
-│              │                                              │
-│              ▼                                              │
-│   2. Claude saves it to godot/assets/sprites/...            │
-│              │                                              │
-│              ▼                                              │
-│   3. python generate_sprites.py rebuilds variants/strips    │
-│              │                                              │
-│              ▼                                              │
-│   4. (Manual) Re-export Godot to godot/export/web/          │
-│      — or skip and rely on a debug screenshotter            │
-│              │                                              │
-│              ▼                                              │
-│   5. Playwright loads the exported index.html and           │
-│      screenshots the board in actual game context —         │
-│      against light and dark squares, alongside siblings     │
-│      (mcp__playwright__browser_take_screenshot)             │
-│              │                                              │
-│              ▼                                              │
-│   6. Claude critiques: silhouette, palette match,           │
-│      readability at game scale, consistency                 │
-│              │                                              │
-│              ▼                                              │
-│   7. Claude regenerates with adjusted prompt → loop         │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-The re-export step (4) is the friction. Until a Godot CLI export script lives in this repo (e.g. `godot --headless --export-release "Web" godot/export/web/index.html`), step 4 is manual. Once that's automated, the loop runs end-to-end without intervention.
+Moved to [tools/sprites/README.md](tools/sprites/README.md) — covers the procedural PIL drawer (`generate_sprites.py`), the PixelLab AI generator (`gen_sprites.py`), the head-only inpaint helper (`inpaint_heads.py`), regen instructions, and lessons learned. The closed-loop workflow with Playwright (re-export → screenshot → critique → re-prompt) is also documented there.
 
 ---
 
@@ -209,5 +112,6 @@ The re-export step (4) is the friction. Until a Godot CLI export script lives in
 ## 4. Cost notes
 
 - **Playwright**: zero recurring cost. One-time ~500MB disk + bandwidth for Chromium. No API.
-- **PixelLab**: pay-per-use credits (cents per sprite). For the chess piece set, expect single-digit dollars to land a polished base set, then $0 forever for procedural variants under Pattern B.
-- **Tier 2 upgrade (Replicate + LoRA)**: ~$15 one-time to train a custom LoRA on hand-curated reference sprites if PixelLab can't hit the exact aesthetic. Would replace PixelLab calls with Replicate calls in the same MCP slot.
+- **PixelLab**: pay-per-use credits. The full 18-sprite chess set cost ~10 API calls (1 anchor + 5 base + 3 variants + 1 retry). Black versions are procedurally recolored from white via local PIL — no API calls. Total cost for the current state: a few cents to maybe a dollar.
+- **Future regenerations**: each `--only <piece>` run is 1 API call. Iterating on a single piece's prompt costs cents.
+- **Tier 2 upgrade (Replicate + LoRA)**: ~$15 one-time to train a custom LoRA on hand-curated reference sprites if PixelLab can't hit the exact aesthetic. Would replace PixelLab calls with Replicate calls in the same orchestration script.

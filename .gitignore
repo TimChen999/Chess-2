@@ -1,6 +1,15 @@
 # Claude local config (per-machine)
 .claude/
 
+# Local secrets (API keys for sprite-gen tooling, etc.)
+.env
+.env.local
+.env.*.local
+
+# Python bytecode cache (sprite-gen tooling)
+__pycache__/
+*.pyc
+
 # Godot 4 editor cache & import data
 godot/.godot/
 godot/.import/

@@ -22,8 +22,8 @@ Animations per piece:
 FX:
   cannon_resolve (8), debris_fall (8), lightning_strike (6)
 
-Run from the project root:
-  python generate_sprites.py
+Run from anywhere (paths resolve relative to the project root regardless of cwd):
+  python tools/sprites/generate_sprites.py
 """
 
 import os
@@ -36,7 +36,10 @@ from PIL import Image, ImageDraw
 
 FRAME = 32
 
-SPRITES_ROOT = os.path.join("godot", "assets", "sprites")
+# Resolve godot/ relative to this script's location so the script works
+# whether you run it from the project root or from inside tools/sprites/.
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SPRITES_ROOT = os.path.join(_PROJECT_ROOT, "godot", "assets", "sprites")
 ROOT = os.path.join(SPRITES_ROOT, "anim")
 PIECES_ROOT = os.path.join(ROOT, "pieces")
 FX_ROOT = os.path.join(ROOT, "fx")
