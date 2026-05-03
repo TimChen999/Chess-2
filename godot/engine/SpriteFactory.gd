@@ -155,19 +155,45 @@ static func _load_single(path: String) -> Texture2D:
 # ABILITY / HAZARD FX
 # ===========================================================================
 
+## Cannon impact strip — 192×192 frames (3-square cross-AOE bounding
+## box). Plays AFTER the cannonball Y-tween lands at the AOE center;
+## holds only the explosion + smoke (descent is in Godot, not the strip).
 static func cannon_resolve_frames() -> Array:
 	var key := "fx:cannon_resolve"
 	if _cache.has(key): return _cache[key]
-	var f := _load_strip("%s/anim/fx/cannon_resolve.png" % ASSET_ROOT)
+	var f := _load_strip("%s/anim/fx/cannon_resolve.png" % ASSET_ROOT, 192)
 	_cache[key] = f
 	return f
 
+## Debris impact strip — 64×64 frames (single square). Plays AFTER
+## the rocks Y-tween lands at the target square center.
 static func debris_fall_frames() -> Array:
 	var key := "fx:debris_fall"
 	if _cache.has(key): return _cache[key]
-	var f := _load_strip("%s/anim/fx/debris_fall.png" % ASSET_ROOT)
+	var f := _load_strip("%s/anim/fx/debris_fall.png" % ASSET_ROOT, 64)
 	_cache[key] = f
 	return f
+
+## Static cannonball texture (PixelLab atom). 64×64. Used as the
+## descending object for the cannon ability — Y-tweened in Godot
+## from off-screen above down to the AOE center, then hidden when
+## the cannon_resolve_frames strip plays.
+static func cannonball_texture() -> Texture2D:
+	var key := "fx:cannonball"
+	if _cache.has(key): return _cache[key]
+	var t := _load_single("%s/anim/fx/cannonball.png" % ASSET_ROOT)
+	_cache[key] = t
+	return t
+
+## Static debris rocks texture (PixelLab atom). 64×64. Y-tweened from
+## off-screen above down to the target square, then hidden when the
+## debris_fall_frames strip plays.
+static func debris_rocks_texture() -> Texture2D:
+	var key := "fx:debris_rocks"
+	if _cache.has(key): return _cache[key]
+	var t := _load_single("%s/anim/fx/debris_rocks.png" % ASSET_ROOT)
+	_cache[key] = t
+	return t
 
 ## Lightning frames are 64 wide × 256 tall (4 board squares high) so
 ## the bolt visibly comes from the sky — see _play_lightning_at in

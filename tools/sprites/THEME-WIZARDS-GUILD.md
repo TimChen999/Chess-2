@@ -858,21 +858,74 @@ frame so the falling/striking motion is actually visible.
 This replaces the earlier per-frame text generation that produced
 in-canvas-centered objects with no observable motion when played.
 
-### 6a. Fireball — `cannon_resolve.png` (14 frames)
+### 6a. Cannon — `cannon_resolve.png` + `cannonball.png` (sky-strike)
 
-Atoms (PixelLab pixflux, prompt + transparent background):
-- `fireball`: orange-red fireball with flame trails
-- `explosion`: orange-yellow circular explosion
-- `smoke`: soft grey smoke wisps (mostly transparent)
+Reads as **sky-strike**: a flaming cannonball falls FAST from off-screen
+above and lands at the AOE center, where a single cohesive cross-shape
+explosion fills the 5-cell PLUS AOE (Rules.gd `CANNON_PLUS_OFFSETS` =
+center + 4 cardinal neighbors). The four flame arms reach into the
+cardinal cells; the corner cells stay untouched. **One sprite = the
+whole AOE explosion**, not five independent puffs.
 
-Procedural composition (`build_fireball()` in `wizard_vfx.py`):
+Architecturally split into two files:
 
-| frames | content |
+- **`cannonball.png`** — static 64×64 PixelLab atom (the falling
+  cannonball). Has a black iron ball at the bottom-center with a tall
+  perfectly-vertical orange-red flame column above it. Shown via a
+  Godot Y-tween (no descent frames are baked into the strip).
+- **`cannon_resolve.png`** — 8-frame post-impact strip on a 192×192
+  canvas (3 squares × 3 squares = the cross-AOE bounding box). Plays
+  AFTER the cannonball lands.
+
+**Atoms** (in `_pixellab_cache/`):
+
+| atom | seed | prompt | use |
+|---|---|---|---|
+| `cannonball_straight_down` | 8121 | black iron cannonball at bottom-center with perfectly vertical orange-red flame trail above, no diagonal angle | static descender texture |
+| `cannon_cross_blast` | 8113 | plus-shaped explosion with four flame arms in cardinal directions, no diagonal arms, no circular shape | post-impact cross explosion |
+| `smoke` | 8103 | soft grey smoke wisps | post-explosion fade |
+
+The earlier `fireball` (8101), `explosion` (8102), and `cannonball_down`
+(8111) atoms were rejected: 8101 was an omnidirectional fireball
+(no clear "down" axis), 8102 was a circular blob (not cross-shape),
+8111 came out angled. Left in cache for diff purposes.
+
+**Post-impact strip layout** (`build_fireball()` in `wizard_vfx.py`):
+
+192×192 frames, explosion centered at (96, 96). 8 frames total.
+
+| frame | content |
 |---|---|
-| 0–5 | fireball descends from y=8 to y=48, scale 0.55 → 0.85 |
-| 6 | white-hot impact flash (explosion atom tinted bright) at y=52 |
-| 7–11 | explosion expands (scale 0.55 → 1.20, fades opacity) |
-| 12–13 | smoke dissipates (50% then 20% opacity) |
+| 0 | white-hot impact flash (cross_blast tinted toward white, scale 2.4) |
+| 1 | cross explosion just bloomed (scale 2.50, alpha 1.00) |
+| 2 | arms reaching into cardinal cells (scale 3.00, alpha 0.95) |
+| 3 | **PEAK** — arms cover all 4 cardinal squares (scale 3.40, alpha 0.85) |
+| 4 | fading (scale 3.50, alpha 0.65) |
+| 5 | further fading (scale 3.55, alpha 0.40) |
+| 6 | smoke wisp (scale 2.20, alpha 0.55) |
+| 7 | smoke dissipating (scale 2.40, alpha 0.20) |
+
+**Godot wiring** — `_play_cannon_resolve()` in
+[GameScene.gd](../../godot/scenes/GameScene.gd):
+
+1. Find the AOE center cell (the one whose 4 cardinal neighbors are
+   all in `squares`). Fall back to the centroid of `squares` if
+   clipped at the board edge.
+2. Spawn a 32×128 TextureRect (`cannonball.png`) — display height is
+   2 squares, head occupies the bottom 32×32 (~50% of debris linear
+   size, with a long flame trail above). Position: 8 squares above
+   the AOE center, x-centered.
+3. Y-tween the cannonball's position straight down to the AOE center
+   over `CANNON_DESCENT_DUR = 0.22s` (fast — heavy iron ball drops
+   sharply).
+4. At impact (`+ 0.22s`), `_hide_descender(cannonball)` makes the
+   cannonball invisible. Spawn a 3*SQ × 3*SQ TextureRect at the AOE
+   center, frame-swap through `cannon_resolve.png`, fade-out at end.
+
+The cannonball ALWAYS spawns 8 squares above the AOE center, so for
+any target row the spawn point is well above the visible board area
+— the ball reads as falling from the sky regardless of where on the
+board it lands.
 
 ### 6b. Lightning — `lightning_strike.png` (6 frames, **tall sky-strike**)
 
@@ -980,16 +1033,58 @@ frame (damage applies the moment the player sees the peak spark).
   correctly. Defaults to `frame_w = h` (square frames) for every
   other VFX strip.
 
-### 6c. Magic rocks — `debris_fall.png` (9 frames)
+### 6c. Debris — `debris_fall.png` + `debris_rocks.png` (sky-strike, single cell)
 
-Atoms: `magic_rocks` (cluster of grey chunks with purple aura),
-`rocks_impact` (dust + sparkle burst), `purple_sparkles` (swirl).
+Same architecture as the cannon (descent via Godot Y-tween + a
+post-impact strip), but for a **single-cell** target. Slower descent
+than the cannon — heavy rocks drift down rather than the iron ball
+plummeting.
 
-| frames | content |
+- **`debris_rocks.png`** — static 64×64 PixelLab atom: three jagged
+  dark-grey rock chunks clustered together with a faint purple
+  magical aura around them. Y-tweened in Godot.
+- **`debris_fall.png`** — 4-frame post-impact strip on a 64×64
+  canvas. Plays AFTER the rocks land.
+
+**Atoms**:
+
+| atom | seed | prompt | use |
+|---|---|---|---|
+| `magic_rocks` | 8301 | three jagged dark-grey rock chunks clustered together with a faint purple magical aura | static descender texture |
+| `rocks_impact` | 8302 | brown-and-purple dust burst with sparkle rays radiating outward, ground impact | F0 of impact strip |
+| `purple_sparkles` | 8303 | swirl of purple sparkle particles spreading outward | F1–F3 fade-out |
+
+**Post-impact strip layout** (`build_magic_rocks()` in `wizard_vfx.py`):
+
+64×64 frames, impact centered at (32, 32). 4 frames total.
+
+| frame | content |
 |---|---|
-| 0–4 | rocks descend from y=10 to y=48 |
-| 5 | impact at y=50 |
-| 6–8 | sparkles spread outward (scale up, opacity down) |
+| 0 | dust burst at impact (rocks_impact, scale 0.95) |
+| 1 | sparkles swirl out (scale 0.85, alpha 0.85) |
+| 2 | sparkles wider + fading (scale 1.05, alpha 0.55) |
+| 3 | sparkles dissipating (scale 1.20, alpha 0.20) |
+
+**Godot wiring** — `_play_debris_resolve()` in
+[GameScene.gd](../../godot/scenes/GameScene.gd):
+
+For each targeted square (debris is single-cell per spec, but the
+same code path supports a list of cells with a per-cell ripple delay):
+
+1. Spawn a 56×56 TextureRect (`debris_rocks.png`) — display size is
+   close to 1 board square so the head reads as bigger than the
+   cannonball's head. Position: 8 squares above the target square
+   center, x-centered.
+2. Y-tween the rocks' position straight down to the target square
+   center over `DEBRIS_DESCENT_DUR = 0.42s` (~2× slower than the
+   cannonball — heavy rocks fall slower than the iron ball).
+3. At impact, `_hide_descender(rocks)` hides the rocks. Spawn a
+   1*SQ × 1*SQ TextureRect at the target square, frame-swap through
+   `debris_fall.png`, fade-out at end.
+
+Same "always spawns 8 squares above the target" rule as the cannon
+guarantees the descent is visibly from off-screen-above regardless
+of target row.
 
 ### 6d. VFX verification
 

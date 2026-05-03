@@ -123,59 +123,95 @@ def resize_atom(atom: Image.Image, scale: float) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# FIREBALL — 14 frames: fireball falls top→bottom, impact, explosion, smoke
+# CANNON — POST-IMPACT strip only. Cannonball descent is handled by a
+# Godot-side Y-tween of the static cannonball texture (so we don't
+# pre-render a long sprite for the falling-from-sky path; only the
+# hit-the-ground reaction frames).
+#
+# The cannon AOE is a PLUS / CROSS shape — 5 squares: center + four
+# cardinal neighbors (Rules.gd CANNON_PLUS_OFFSETS). The impact strip
+# canvas is 3×3 squares (192×192 in source-pixel units) — the bbox of
+# the cross AOE — and contains a single cohesive cross-shape
+# explosion that fills the AOE, NOT five separate explosions at each
+# cell. In Godot the strip's center aligns with the target square's
+# center and arms reach into the four cardinal squares.
 # ---------------------------------------------------------------------------
 
+CANNON_IMPACT_W = 192      # 3 squares wide — cross-AOE bounding box
+CANNON_IMPACT_H = 192      # 3 squares tall — cross-AOE bounding box
+CANNON_IMPACT_CENTER = (96, 96)
+
+
+def build_cannonball(client, force: bool) -> Image.Image:
+    """Static cannonball texture — Y-tweened in Godot. 64×64.
+    The PixelLab atom is exactly what we want, just saved into the
+    Godot assets directory under a stable name."""
+    cannonball = gen_atom(client, "cannonball_straight_down",
+                           "a black iron cannonball at the BOTTOM CENTER of the frame with a tall "
+                           "PERFECTLY VERTICAL straight up-and-down column of orange-red flames trailing "
+                           "STRAIGHT UP behind it, no diagonal angle, no horizontal sway, the flame "
+                           "trail axis must be exactly vertical and centered, cannonball falling "
+                           "straight down",
+                           seed=8121, force=force)
+    return cannonball.convert("RGBA").copy()
+
+
 def build_fireball(client, force: bool) -> Image.Image:
-    fb = gen_atom(client, "fireball", "a single bright orange-and-red fireball with flame trails behind it",
-                  seed=8101, force=force)
-    expl = gen_atom(client, "explosion", "a bright orange-and-yellow circular explosion with flame tongues",
-                    seed=8102, force=force)
-    smoke = gen_atom(client, "smoke", "a soft grey smoke cloud, mostly transparent wisps",
-                     seed=8103, force=force)
+    """Cannon post-impact strip: cross explosion expansion + smoke fade.
+    14-frame layout has been compressed to 8 frames since the descent
+    is now handled in Godot via Y-tween on the cannonball texture."""
+    blast = gen_atom(client, "cannon_cross_blast",
+                      "a single large plus-shaped or cross-shaped ground explosion with four bright "
+                      "orange-yellow flame arms extending vertically up, vertically down, horizontally "
+                      "left, and horizontally right from a bright white-hot center, plus sign shape, "
+                      "no diagonal arms, no circular shape, sharp pixel-art flame edges",
+                      seed=8113, force=force)
+    smoke = gen_atom(client, "smoke",
+                      "a soft grey smoke cloud, mostly transparent wisps",
+                      seed=8103, force=force)
 
-    n = 14
-    strip = Image.new("RGBA", (FRAME * n, FRAME), (0, 0, 0, 0))
+    n = 8
+    fw = CANNON_IMPACT_W
+    fh = CANNON_IMPACT_H
+    cx, cy = CANNON_IMPACT_CENTER
+    strip = Image.new("RGBA", (fw * n, fh), (0, 0, 0, 0))
 
-    # Frames 0-5: fireball descends from y=8 to y=48, slight scale-up
-    for i in range(6):
-        progress = i / 5.0
-        y = int(8 + progress * 40)
-        scale = 0.55 + progress * 0.30   # 0.55 → 0.85
-        fb_scaled = resize_atom(fb, scale)
-        frame = place_centered(FRAME, fb_scaled, FRAME // 2, y)
-        strip.paste(frame, (i * FRAME, 0), frame)
-
-    # Frame 6: white-hot impact flash at y=52
-    flash = expl.copy()
-    # Tint flash to bright white
+    # F0: white-hot impact flash. Tint the explosion atom toward white
+    # so the moment of impact reads as a brilliant flash before the
+    # orange cross-shape blooms.
+    flash = blast.copy()
     fp = flash.load()
-    fw, fh = flash.size
-    for y in range(fh):
-        for x in range(fw):
-            r, g, b, a = fp[x, y]
+    fw_atom, fh_atom = flash.size
+    for fy in range(fh_atom):
+        for fx in range(fw_atom):
+            r, g, b, a = fp[fx, fy]
             if a >= ALPHA_THRESH:
-                fp[x, y] = (255, min(255, g + 80), min(255, b + 80), a)
-    flash_scaled = resize_atom(flash, 0.85)
-    frame = place_centered(FRAME, flash_scaled, FRAME // 2, 52)
-    strip.paste(frame, (6 * FRAME, 0), frame)
+                fp[fx, fy] = (255, min(255, g + 80), min(255, b + 80), a)
+    flash_sized = resize_atom(flash, 2.4)
+    f0 = _place_centered_xy(fw, fh, flash_sized, cx, cy)
+    strip.paste(f0, (0 * fw, 0), f0)
 
-    # Frames 7-11: explosion expands outward at the bottom
-    for i in range(5):
-        progress = (i + 1) / 5.0
-        scale = 0.55 + progress * 0.65   # 0.55 → 1.20
-        opacity = 1.0 - progress * 0.4
-        expl_scaled = resize_atom(expl, scale)
-        frame = place_centered(FRAME, fade(expl_scaled, opacity),
-                               FRAME // 2, 48)
-        strip.paste(frame, ((7 + i) * FRAME, 0), frame)
+    # F1-F5: cross-shape explosion expands outward from the AOE center,
+    # arms reaching into the four cardinal AOE squares at peak (F2/F3),
+    # then fades.
+    expl_progression = [
+        (2.50, 1.00),   # F1  — cross just bloomed
+        (3.00, 0.95),   # F2  — arms reaching into cardinal cells
+        (3.40, 0.85),   # F3  — PEAK — cross arms fully cover cardinals
+        (3.50, 0.65),   # F4  — fading
+        (3.55, 0.40),   # F5
+    ]
+    for i, (sc, op) in enumerate(expl_progression):
+        e = resize_atom(blast, sc)
+        frame = _place_centered_xy(fw, fh, fade(e, op), cx, cy)
+        strip.paste(frame, ((1 + i) * fw, 0), frame)
 
-    # Frames 12-13: smoke dissipating
-    for i, opacity in enumerate([0.55, 0.20]):
-        smoke_scaled = resize_atom(smoke, 0.9 + i * 0.1)
-        frame = place_centered(FRAME, fade(smoke_scaled, opacity),
-                               FRAME // 2, 44 - i * 4)
-        strip.paste(frame, ((12 + i) * FRAME, 0), frame)
+    # F6-F7: smoke dissipating at the AOE center.
+    for i, op in enumerate([0.55, 0.20]):
+        sm = resize_atom(smoke, 2.20 + i * 0.20)
+        frame = _place_centered_xy(fw, fh, fade(sm, op),
+                                    cx, cy - i * 8)
+        strip.paste(frame, ((6 + i) * fw, 0), frame)
     return strip
 
 
@@ -349,13 +385,28 @@ def build_lightning(client, force: bool) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# MAGIC ROCKS — 9 frames: rocks fall, impact, sparkle spread
+# DEBRIS / MAGIC ROCKS — POST-IMPACT strip only. Rocks descent is
+# handled by a Godot-side Y-tween of the static rocks texture.
+#
+# Single-square hit (only ONE block destroyed by debris, per spec).
+# Strip is 1 square × 1 square (64×64) and contains the impact dust
+# burst + sparkle spread + fade.
 # ---------------------------------------------------------------------------
 
-def build_magic_rocks(client, force: bool) -> Image.Image:
+DEBRIS_IMPACT_W = 64
+DEBRIS_IMPACT_H = 64
+
+
+def build_debris_rocks(client, force: bool) -> Image.Image:
+    """Static rocks texture — Y-tweened in Godot. 64×64."""
     rocks = gen_atom(client, "magic_rocks",
                      "three jagged dark-grey rock chunks clustered together with a faint purple magical aura around them",
                      seed=8301, force=force)
+    return rocks.convert("RGBA").copy()
+
+
+def build_magic_rocks(client, force: bool) -> Image.Image:
+    """Debris post-impact strip: dust burst + sparkle spread + fade."""
     impact = gen_atom(client, "rocks_impact",
                       "a brown-and-purple dust burst with sparkle rays radiating outward, ground impact effect",
                       seed=8302, force=force)
@@ -363,27 +414,21 @@ def build_magic_rocks(client, force: bool) -> Image.Image:
                         "a swirl of purple sparkle particles spreading outward, mostly transparent",
                         seed=8303, force=force)
 
-    n = 9
-    strip = Image.new("RGBA", (FRAME * n, FRAME), (0, 0, 0, 0))
+    n = 4
+    fw = DEBRIS_IMPACT_W
+    fh = DEBRIS_IMPACT_H
+    strip = Image.new("RGBA", (fw * n, fh), (0, 0, 0, 0))
 
-    # Frames 0-4: rocks descend
-    for i in range(5):
-        progress = i / 4.0
-        y = int(10 + progress * 38)
-        rocks_scaled = resize_atom(rocks, 0.75)
-        f = place_centered(FRAME, rocks_scaled, FRAME // 2, y)
-        strip.paste(f, (i * FRAME, 0), f)
+    # F0: impact dust burst at the target square center.
+    impact_scaled = resize_atom(impact, 0.95)
+    f0 = _place_centered_xy(fw, fh, impact_scaled, fw // 2, fh // 2)
+    strip.paste(f0, (0 * fw, 0), f0)
 
-    # Frame 5: impact at bottom
-    impact_scaled = resize_atom(impact, 0.85)
-    f5 = place_centered(FRAME, impact_scaled, FRAME // 2, 50)
-    strip.paste(f5, (5 * FRAME, 0), f5)
-
-    # Frames 6-8: sparkles spread + fade
+    # F1-F3: sparkles spread + fade.
     for i, (op_, sc) in enumerate([(0.85, 0.85), (0.55, 1.05), (0.20, 1.20)]):
         s = resize_atom(sparkles, sc)
-        f = place_centered(FRAME, fade(s, op_), FRAME // 2, 48)
-        strip.paste(f, ((6 + i) * FRAME, 0), f)
+        f = _place_centered_xy(fw, fh, fade(s, op_), fw // 2, fh // 2)
+        strip.paste(f, ((1 + i) * fw, 0), f)
     return strip
 
 
@@ -395,6 +440,14 @@ VFX = {
     "fireball": ("cannon_resolve", build_fireball),
     "lightning": ("lightning_strike", build_lightning),
     "magic_rocks": ("debris_fall", build_magic_rocks),
+}
+
+# Static atom textures — single-frame PNGs used by Godot for the
+# falling-from-sky descent (Y-tweened to the target). Generated
+# alongside the impact strips.
+STATIC_ATOMS = {
+    "cannonball":   ("cannonball",  build_cannonball),
+    "debris_rocks": ("debris_rocks", build_debris_rocks),
 }
 
 
@@ -416,6 +469,15 @@ def main():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         strip.save(out_path)
         print(f"   saved -> {out_path.relative_to(ROOT)}  size={strip.size}")
+    for atom, (out_name, build_fn) in STATIC_ATOMS.items():
+        if only and atom not in only:
+            continue
+        print(f"\n=== {atom} (static) ===")
+        img = build_fn(client, args.force)
+        out_path = FX_DIR / f"{out_name}.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        img.save(out_path)
+        print(f"   saved -> {out_path.relative_to(ROOT)}  size={img.size}")
 
 
 if __name__ == "__main__":

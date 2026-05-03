@@ -1689,6 +1689,14 @@ func _hide_flash_child(flash_child: TextureRect) -> void:
 		flash_child.texture = null
 
 
+## Hide a descending FX sprite (cannonball / rocks) at the moment it
+## "lands" — so the post-impact strip can take over from the same
+## screen position without the descender visibly persisting underneath.
+func _hide_descender(descender: TextureRect) -> void:
+	if is_instance_valid(descender):
+		descender.visible = false
+
+
 ## Knight / Alter Knight parabolic arc — driven by tween_method so the
 ## position computation is per-tick and overrides the linear lerp the
 ## position tween would otherwise produce. KNIGHT_ARC_HEIGHT controls the
@@ -1700,22 +1708,155 @@ func _set_knight_arc_pos(t: float, lbl: TextureRect,
 	pos.y -= KNIGHT_ARC_HEIGHT * 4.0 * t * (1.0 - t)
 	lbl.position = pos
 
-## AOE resolve helper — kicks off a sprite-based one-shot at every square in
-## `squares`, with a small per-square ripple delay so the effect reads as
-## radiating outward instead of all popping at once.
+## AOE resolve helper — both abilities use the same architecture:
+##   1. Spawn a "descending object" TextureRect (cannonball / rocks)
+##      at a position OFF-SCREEN-ABOVE the target.
+##   2. Y-tween its position straight down to the target's center.
+##   3. At impact, hide the descender and spawn a post-impact strip
+##      (cross explosion / dust burst + sparkles) at the AOE center
+##      and frame-swap through it.
+##
+## The "from the sky" read comes from the Y-tween (sprite literally
+## travels from off-screen down to target), so neither strip needs to
+## bake in any descent frames — strips are just the post-impact
+## reaction. Cannonball falls fast; rocks fall slow.
+##
+##   cannon — squares = the 5 PLUS-shape cells. Single explosion
+##            sprite covers the whole cross at the center cell.
+##   debris — squares = a single cell. One descender per cell.
+const CANNON_DESCENT_DUR := 0.22     # fast — cannonball drops sharply
+const CANNON_DESCENT_HEIGHT_SQ := 8  # spawns 8 squares above AOE center
+const CANNON_BALL_W := 32             # cannonball display width (px)
+const CANNON_BALL_H := 128            # display height — long flame trail above head
+const DEBRIS_DESCENT_DUR := 0.42     # slower — rocks drift down heavier
+const DEBRIS_DESCENT_HEIGHT_SQ := 8  # spawns 8 squares above target
+const DEBRIS_DISPLAY_SIZE := 56       # rocks display size (~ a square)
+
 func _play_aoe_resolve(tween: Tween, squares: Array, kind: String, floats: Array) -> void:
-	var frames: Array = SpriteFactory.aoe_resolve_frames(kind)
-	if frames.is_empty(): return
-	var per_frame := 0.06 if kind == "cannon" else 0.05
-	var total := per_frame * float(frames.size())
+	if squares.is_empty(): return
+	if kind == "cannon":
+		_play_cannon_resolve(tween, squares, floats)
+	elif kind == "debris":
+		_play_debris_resolve(tween, squares, floats)
+
+
+## CANNON — single descending cannonball + single cross-shape explosion
+## sprite covering the whole 5-cell PLUS AOE.
+func _play_cannon_resolve(tween: Tween, squares: Array, floats: Array) -> void:
+	# Find the AOE center cell. Rules.gd cannon_plus_squares() puts the
+	# target itself at index 0 (offset (0,0) is the first entry of
+	# CANNON_PLUS_OFFSETS, and on-board target is guaranteed for a fired
+	# cannon), so `squares[0]` is the reliable center even when the
+	# cross is clipped against the board edge. Cross-check by detecting
+	# the cell whose four cardinal neighbors are all in the set, just
+	# in case the target list ever gets reordered upstream.
+	var center_sq: int = int(squares[0])
+	var sq_set := {}
+	for raw in squares:
+		sq_set[int(raw)] = true
+	for raw in squares:
+		var s := int(raw)
+		var col := s % 8
+		var row := s / 8
+		var has_n := row > 0 and sq_set.has(s - 8)
+		var has_s := row < 7 and sq_set.has(s + 8)
+		var has_e := col < 7 and sq_set.has(s + 1)
+		var has_w := col > 0 and sq_set.has(s - 1)
+		if has_n and has_s and has_e and has_w:
+			center_sq = s
+			break
+	var center_pos := _sq_to_pos(center_sq) + Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+
+	# Cannonball descender — Y-tweens from way above the AOE down to
+	# the AOE center. Aspect 1:4 (head ~32×32, tail ~32×96 above).
+	var cannonball := TextureRect.new()
+	cannonball.texture = SpriteFactory.cannonball_texture()
+	cannonball.size = Vector2(CANNON_BALL_W, CANNON_BALL_H)
+	cannonball.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	cannonball.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	cannonball.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	cannonball.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Anchor: cannonball's HEAD (bottom of its texture) lands at the
+	# AOE center. Texture is laid out with the head at the bottom of
+	# the 32×128 rect, so the rect's bottom edge = head impact point.
+	var land_pos := center_pos - Vector2(CANNON_BALL_W * 0.5, CANNON_BALL_H)
+	var spawn_pos := land_pos - Vector2(0, SQ_SIZE * CANNON_DESCENT_HEIGHT_SQ)
+	cannonball.position = spawn_pos
+	anim_overlay.add_child(cannonball)
+	floats.append(cannonball)
+	tween.tween_property(cannonball, "position", land_pos, CANNON_DESCENT_DUR) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# Hide cannonball at impact (next callback fires at +CANNON_DESCENT_DUR).
+	tween.tween_callback(_hide_descender.bind(cannonball)) \
+		.set_delay(CANNON_DESCENT_DUR)
+
+	# Cross-explosion strip — single sprite covering the 3×3 AOE bbox,
+	# arms reaching into the four cardinal cells.
+	var frames: Array = SpriteFactory.cannon_resolve_frames()
+	if not frames.is_empty():
+		var per_frame := 0.06
+		var total := per_frame * float(frames.size())
+		var expl := TextureRect.new()
+		expl.texture = frames[0]
+		# 3 squares wide × 3 squares tall, centered on the AOE center.
+		expl.size = Vector2(SQ_SIZE * 3, SQ_SIZE * 3)
+		expl.position = center_pos - expl.size * 0.5
+		expl.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		expl.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		expl.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		expl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		expl.modulate.a = 0.0    # invisible until impact
+		anim_overlay.add_child(expl)
+		floats.append(expl)
+		tween.tween_property(expl, "modulate:a", 1.0, 0.04) \
+			.set_delay(CANNON_DESCENT_DUR)
+		UiMotion.schedule_frame_swaps(tween, expl, frames, total,
+			CANNON_DESCENT_DUR)
+		tween.tween_property(expl, "modulate:a", 0.0, 0.12) \
+			.set_delay(CANNON_DESCENT_DUR + total - 0.10)
+
+
+## DEBRIS — single descending rocks + single-square impact strip per
+## targeted cell. (Debris hits a single cell per spec; if `squares`
+## has multiple cells, each gets its own descender.)
+func _play_debris_resolve(tween: Tween, squares: Array, floats: Array) -> void:
+	var frames: Array = SpriteFactory.debris_fall_frames()
+	var per_frame := 0.05
+	var total := per_frame * float(frames.size()) if not frames.is_empty() else 0.0
 	for i in squares.size():
 		var sq: int = int(squares[i])
 		var ripple: float = float(i) * 0.04
-		var fx := _create_fx_sprite(sq, frames)
-		floats.append(fx)
-		UiMotion.schedule_frame_swaps(tween, fx, frames, total, ripple)
-		## Fade out after the last frame so the sprite doesn't linger.
-		tween.tween_property(fx, "modulate:a", 0.0, 0.10).set_delay(ripple + total - 0.05)
+		var center_pos := _sq_to_pos(sq) + Vector2(SQ_SIZE * 0.5, SQ_SIZE * 0.5)
+
+		var rocks := TextureRect.new()
+		rocks.texture = SpriteFactory.debris_rocks_texture()
+		rocks.size = Vector2(DEBRIS_DISPLAY_SIZE, DEBRIS_DISPLAY_SIZE)
+		rocks.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		rocks.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		rocks.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		rocks.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		# Rocks land centered on the target square.
+		var land_pos := center_pos - rocks.size * 0.5
+		var spawn_pos := land_pos - Vector2(0, SQ_SIZE * DEBRIS_DESCENT_HEIGHT_SQ)
+		rocks.position = spawn_pos
+		anim_overlay.add_child(rocks)
+		floats.append(rocks)
+		tween.tween_property(rocks, "position", land_pos, DEBRIS_DESCENT_DUR) \
+			.set_delay(ripple) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		tween.tween_callback(_hide_descender.bind(rocks)) \
+			.set_delay(ripple + DEBRIS_DESCENT_DUR)
+
+		if not frames.is_empty():
+			var fx := _create_fx_sprite(sq, frames)
+			fx.modulate.a = 0.0
+			floats.append(fx)
+			tween.tween_property(fx, "modulate:a", 1.0, 0.04) \
+				.set_delay(ripple + DEBRIS_DESCENT_DUR)
+			UiMotion.schedule_frame_swaps(tween, fx, frames, total,
+				ripple + DEBRIS_DESCENT_DUR)
+			tween.tween_property(fx, "modulate:a", 0.0, 0.10) \
+				.set_delay(ripple + DEBRIS_DESCENT_DUR + total - 0.08)
 
 ## Lightning resolve helper — single-target, no ripple. The lightning
 ## strip uses TALL frames (10 squares high) so the bolt always reads
