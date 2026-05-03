@@ -55,6 +55,16 @@ HIGHLIGHT = (130, 128, 138, 255)
 
 ALPHA_THRESH = 8
 
+# Black-team body palette. The values match what the baseline black
+# sprites actually use (committed at 4ceaa7d): FILL = (64,64,70),
+# OUTLINE = (40,40,40). BLACK_HILIGHT is the lighter shading the user
+# asked for on dark pieces; BLACK_SHADOW exists for parity but the
+# baseline black doesn't currently have a separate shadow band.
+BLACK_OUTLINE = (40, 40, 40, 255)
+BLACK_FILL    = (64, 64, 70, 255)
+BLACK_SHADOW  = (50, 50, 56, 255)
+BLACK_HILIGHT = (102, 102, 112, 255)
+
 
 # ---------------------------------------------------------------------------
 # UTILITIES
@@ -103,63 +113,72 @@ def row_xs(mask, y):
 # BODY TEXTURE PASS — subtle shading bump (procedural, no API)
 # ---------------------------------------------------------------------------
 
-def body_texture_pass(img: Image.Image) -> Image.Image:
-    """Add a subtle 1-pixel HIGHLIGHT band on the upper-left silhouette
-    edge (cool reflected light) and widen the right-edge SHADOW band by
-    1 pixel. Suite palette only. Silhouette unchanged."""
+def body_texture_pass(img: Image.Image, color: str = "white") -> Image.Image:
+    """Add subtle interior shading without changing the silhouette.
+
+    For white pieces (cream body): paint a 1-pixel HIGHLIGHT band along
+    the upper-left silhouette edge (looks like a cool inner shadow) and
+    widen the right-edge SHADOW band by 1 px (more depth toward the
+    bottom-right).
+
+    For black pieces (dark body): paint a 1-pixel BLACK_HILIGHT band on
+    the upper-left silhouette edge (a LIGHTER inner band — opposite of
+    white, since the dark body needs lighter pixels to show depth) and
+    widen the right-edge BLACK_SHADOW band similarly. Other parts
+    outside the new shading bands stay byte-identical to the input.
+    """
+    if color == "white":
+        edge_band = HIGHLIGHT       # mid-grey, darker than FILL
+        existing_fill = FILL
+        existing_shadow = SHADOW
+        widen_color = SHADOW        # extend the existing shadow band
+    else:
+        edge_band = BLACK_HILIGHT   # lighter than BLACK_FILL
+        existing_fill = BLACK_FILL
+        existing_shadow = BLACK_SHADOW
+        widen_color = BLACK_HILIGHT  # widen with LIGHTER color (per user)
+
     out = img.convert("RGBA").copy()
     op = out.load()
     w, h = out.size
     sm = alpha_mask(img)
 
-    # Upper-left HIGHLIGHT band: for each row, find the leftmost interior
-    # (non-boundary) pixel that's currently FILL — paint a HIGHLIGHT pixel
-    # one step inside it, but only in the upper 60% of the body.
     bb = silhouette_bbox(img)
     sx0, sy0, sx1, sy1 = bb
     upper_bot = sy0 + int((sy1 - sy0) * 0.60)
     for y in range(sy0, upper_bot + 1):
-        # Find leftmost OUTLINE on this row, then the first FILL just to
-        # the right.
         for x in range(sx0, sx1 + 1):
             if not sm[x][y]:
                 continue
             if is_boundary(sm, x, y):
-                # next x to the right: paint HIGHLIGHT if it's FILL
                 rx = x + 1
                 if (0 <= rx < w and sm[rx][y]
-                        and op[rx, y][:3] == FILL[:3]
+                        and op[rx, y][:3] == existing_fill[:3]
                         and not is_boundary(sm, rx, y)):
-                    op[rx, y] = HIGHLIGHT
+                    op[rx, y] = edge_band
                 break
 
-    # Widen right-edge SHADOW band by 1 pixel: for each row, find the
-    # rightmost interior FILL pixel that's adjacent to a SHADOW pixel,
-    # convert it to SHADOW.
+    # Right-edge band: for each row, find the rightmost SHADOW pixel
+    # and add a `widen_color` pixel just to its left.
     for y in range(h):
-        # Find rightmost SHADOW pixel
         rightmost_shadow = -1
         for x in range(w - 1, -1, -1):
-            if sm[x][y] and op[x, y][:3] == SHADOW[:3]:
+            if sm[x][y] and op[x, y][:3] == existing_shadow[:3]:
                 rightmost_shadow = x
                 break
         if rightmost_shadow < 0:
             continue
-        # Convert the FILL pixel to its left to SHADOW (widen band leftward)
-        lx = rightmost_shadow - 1
-        # Find the leftmost SHADOW pixel in this row (we want to widen
-        # the band leftward by 1, but only convert ONE additional pixel).
         leftmost_shadow = rightmost_shadow
         for xx in range(rightmost_shadow, -1, -1):
-            if sm[xx][y] and op[xx, y][:3] == SHADOW[:3]:
+            if sm[xx][y] and op[xx, y][:3] == existing_shadow[:3]:
                 leftmost_shadow = xx
             else:
                 break
         target = leftmost_shadow - 1
         if (0 <= target < w and sm[target][y]
-                and op[target, y][:3] == FILL[:3]
+                and op[target, y][:3] == existing_fill[:3]
                 and not is_boundary(sm, target, y)):
-            op[target, y] = SHADOW
+            op[target, y] = widen_color
     return out
 
 
@@ -522,8 +541,8 @@ PIECES_ACCESSORIES = {
             id="horn_glow",
             prompt=("a tiny bright pink-magenta sparkle of magical glow, "
                     "dark outline, isolated tiny shape"),
-            target_w=4, target_h=4,
-            anchor=(32, 4), z=1,
+            target_w=3, target_h=3,
+            anchor=(37, 9), z=1,    # right peak = horn tip (left peak = ear)
             negative="full glow, large shape, multiple sparkles",
         ),
     ],
@@ -714,7 +733,7 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
             baseline = pre_clear_king_cross(baseline)
         elif clear_kind == "bishop_cross":
             baseline = pre_clear_bishop_cross(baseline)
-        textured = body_texture_pass(baseline)
+        textured = body_texture_pass(baseline, color=color)
 
         # Three-layer compositing: behind (z<0) → body → front (z≥0).
         behind = [(a, i) for (a, i) in accessory_pngs if a.z < 0]
