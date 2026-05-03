@@ -512,11 +512,12 @@ PIECES_ACCESSORIES = {
         ),
         Accessory(
             id="beard",
-            prompt=("a long flowing white beard hanging downward in a "
-                    "wedge shape, fluffy texture, dark outline, isolated"),
-            target_w=12, target_h=20,
-            anchor=(32, 24), z=1,
-            negative="face, person, body, mustache only",
+            prompt=("a long silver-grey beard hanging downward in a "
+                    "wedge shape, fluffy texture, dark outline, "
+                    "isolated"),
+            target_w=10, target_h=15,
+            anchor=(32, 22), z=1,
+            negative="face, person, body, mustache only, white beard",
         ),
         Accessory(
             id="scepter",
