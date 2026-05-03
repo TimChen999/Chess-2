@@ -37,6 +37,7 @@ Run: python tools/sprites/_split_anim_weapons.py
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -59,6 +60,7 @@ from wizard_animations import (  # type: ignore
     apply_flash,
 )
 from _split_weapons_from_aeaa0be import (  # type: ignore
+    ARC_ONLY_PIECES,
     WEAPON_OVERLAPS_BODY,
     fill_from_nearest_in_row,
 )
@@ -142,6 +144,174 @@ WEAPON_GLOW_COLOR = {
     "queen":       (130, 230, 220),
     "pawn":        (255, 230, 130),
     "bandit_pawn": (220, 230, 245),
+}
+
+
+# Per-piece SWING ARC — a crescent-shaped slash trail painted around
+# the weapon during attack frames. Modeled after classic action-game
+# sword swing arcs (think Sonic / Castlevania): a translucent grey/
+# white moon shape that grows during the wind-up, peaks at the strike,
+# then fades during recovery.
+#
+# Each piece's "frames" entry is one tuple per attack frame:
+#   (start_deg, end_deg, max_alpha)  or  None  (no arc this frame)
+# Angles are in math convention: 0deg = right (+x), 90deg = up (-y),
+# 180deg = left, -90deg = down.
+#
+# - center: (cx, cy) on the 64x64 canvas — the pivot the arc curves
+#   around. For sword/sash pieces this is the body's chest area; for
+#   staves it's the hilt (lower) so the arc sweeps through the orb's
+#   raised position.
+# - inner_r / outer_r: thickness of the crescent. The reference uses
+#   ~12-px thick crescents on a 64x64 canvas.
+# - color: the swing trail tint (silvers / weapon-aligned colors).
+# Sword-blade swing animation. Rather than painting a separate
+# crescent overlay on top of a static sword, we ROTATE THE SWORD
+# SPRITE itself per frame around a pivot point (the hilt), and add
+# motion-blur ghost copies at intermediate angles to fill the arc the
+# blade sweeps through. This is how classic action-platformer sword
+# animations work — the blade IS the arc.
+#
+# Per piece:
+#   pivot           — (cx, cy) on 64x64 canvas to rotate around
+#                     (typically the hilt, where the hand holds it)
+#   ghost_count     — number of intermediate ghost copies between
+#                     consecutive frame angles (more = smoother arc)
+#   ghost_alpha     — peak alpha for the ghost trail (0..255)
+#   attack_angles   — angle in degrees for each attack frame.
+#                     PIL convention: positive = counter-clockwise.
+#                     For a forward (rightward) slash:
+#                       0   = vertical, sword pointing up (rest)
+#                       +N  = sword tilted up-back over shoulder
+#                       -N  = sword tilted forward (toward right)
+#                       -90 = sword horizontal-right (full thrust)
+def make_synthetic_assassin_sword() -> Image.Image:
+    """Hand-painted 64x64 sword sprite for assassin_bishop. The
+    assassin's baseline shows the sword sheathed behind the body
+    (mostly hidden by the sash) so we can't extract it. Instead we
+    draw a synthetic sword that the assassin DRAWS during attack
+    frames — sheathed at rest (F0, F5), drawn for the swing (F1-F4).
+    Hilt sits at the pivot point (32, 50) so rotation pivots around
+    the grip."""
+    OUTLINE = (40, 40, 50, 255)
+    BLADE = (192, 200, 215, 255)        # silver
+    BLADE_HI = (235, 240, 248, 255)      # blade highlight
+    GUARD = (217, 178, 60, 255)          # gold crossguard
+    GRIP = (90, 55, 40, 255)             # dark wood grip
+    POMMEL = (217, 178, 60, 255)         # gold pommel
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    p = img.load()
+    # Sword laid out vertically (tip up, hilt down), pivot at (32, 50).
+    # Blade tip y=22 (decorative point).
+    p[32, 22] = OUTLINE
+    # Blade body y=23..42 (20 px tall, 3 px wide with highlight).
+    for y in range(23, 43):
+        p[31, y] = OUTLINE
+        p[32, y] = BLADE
+        p[33, y] = BLADE_HI
+        p[34, y] = OUTLINE
+    # Crossguard y=43-44 (5 px wide, gold).
+    for x in range(29, 37):
+        p[x, 43] = OUTLINE
+    for x in range(29, 37):
+        p[x, 44] = GUARD
+    p[29, 44] = OUTLINE
+    p[36, 44] = OUTLINE
+    # Cap row below crossguard.
+    p[29, 45] = OUTLINE
+    p[36, 45] = OUTLINE
+    # Grip y=45-48 (3 px wide, dark wood).
+    for y in range(45, 49):
+        p[31, y] = OUTLINE
+        p[32, y] = GRIP
+        p[33, y] = GRIP
+        p[34, y] = OUTLINE
+    # Pommel y=49-50 (round, gold).
+    p[32, 49] = POMMEL
+    p[33, 49] = POMMEL
+    p[31, 49] = OUTLINE
+    p[34, 49] = OUTLINE
+    p[32, 50] = OUTLINE
+    p[33, 50] = OUTLINE
+    return img
+
+
+BLADE_SWING = {
+    "bandit_pawn": {
+        "pivot": (32, 47),
+        "ghost_count": 6,
+        "ghost_alpha": 110,
+        "attack_angles": [
+            0,    # F0 rest — sword vertical
+            35,   # F1 wind-up — sword raised back-up
+            55,   # F2 deeper wind-up — peak back
+            -55,  # F3 SLASH — sword swung forward through arc
+            -85,  # F4 follow-through — sword horizontal forward
+            0,    # F5 settle — back to rest
+        ],
+    },
+    "assassin_bishop": {
+        # Sword is baked into the baseline silhouette and largely
+        # hidden behind the diagonal sash, so weapon_static.png is a
+        # transparent canvas. For the attack swing we draw a SYNTHETIC
+        # sword (built by make_synthetic_assassin_sword), which the
+        # assassin "draws" from the sheath on F1, swings F2-F4, then
+        # resheathes on F5. The body's baked-in sheathed sword stays
+        # in place (pixel-perfect preserved) — the synthetic sword is
+        # an additional overlay that only appears during the swing.
+        "pivot": (32, 50),
+        "ghost_count": 7,
+        "ghost_alpha": 130,
+        "synthetic": "assassin_sword",
+        "attack_angles": [
+            0,    # F0 rest — sheathed (alpha 0 below)
+            30,   # F1 drawn + wind-up
+            55,   # F2 peak wind-up — sword raised back
+            -50,  # F3 SLASH — sword swung forward
+            -85,  # F4 follow-through — full thrust
+            0,    # F5 — sheathed again (alpha 0)
+        ],
+        # Per-frame alpha multiplier — F0 and F5 are 0 (sword is
+        # sheathed and invisible at the start/end of the swing).
+        "frame_alphas": [0.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# CRESCENT SLASH — bold painted swoosh that reads as the slash itself.
+# Per-frame None means "no crescent on this frame". Otherwise dict with:
+#   r_inner, r_outer, start_deg, end_deg, max_alpha, palette
+# Angles: 0=right, 90=up, 180=left, -90=down (screen coords).
+# Painted on the weapon canvas BEHIND the rotated blade so the blade
+# rides on the leading edge of the crescent.
+# ---------------------------------------------------------------------------
+
+CRESCENT_SLASH = {
+    "bandit_pawn": {
+        "pivot": (32, 46),
+        "palette": "silver",
+        "attack_frames": [
+            None,                                                                                       # F0 rest
+            None,                                                                                       # F1 wind-up
+            {"r_inner": 8,  "r_outer": 22, "start_deg":  85, "end_deg": 165, "max_alpha": 145},        # F2 forming
+            {"r_inner": 7,  "r_outer": 30, "start_deg": -50, "end_deg": 145, "max_alpha": 235},        # F3 PEAK SLASH
+            {"r_inner": 7,  "r_outer": 26, "start_deg": -85, "end_deg":  20, "max_alpha": 175},        # F4 follow-through
+            None,                                                                                       # F5 settle
+        ],
+    },
+    "assassin_bishop": {
+        "pivot": (32, 50),
+        "palette": "silver",
+        "attack_frames": [
+            None,
+            None,
+            {"r_inner": 8,  "r_outer": 22, "start_deg":  80, "end_deg": 160, "max_alpha": 150},
+            {"r_inner": 7,  "r_outer": 30, "start_deg": -55, "end_deg": 150, "max_alpha": 240},
+            {"r_inner": 7,  "r_outer": 26, "start_deg": -90, "end_deg":  15, "max_alpha": 180},
+            None,
+        ],
+    },
 }
 
 
@@ -269,6 +439,174 @@ def paint_glow_cluster(img: Image.Image, cx: int, cy: int,
     return out
 
 
+CRESCENT_PALETTES = {
+    # (shadow / fill / highlight) — three radial bands, dark on the
+    # inner edge, mid-tone fill, bright rim on the outer edge. Matches
+    # the "painted crescent" look of classic action-game slash effects.
+    "silver": ((45, 55, 75), (190, 195, 210), (248, 250, 255)),
+    "steel":  ((30, 35, 50), (165, 170, 185), (240, 244, 252)),
+}
+
+
+def paint_crescent_slash(img: Image.Image,
+                          pivot: tuple[float, float],
+                          r_inner: float, r_outer: float,
+                          start_deg: float, end_deg: float,
+                          palette: str = "silver",
+                          max_alpha: int = 235,
+                          streaks: bool = True) -> Image.Image:
+    """Paint a bold, painted-looking crescent slash — the kind seen in
+    classic action-game sprite work where a single solid swoosh dominates
+    the frame.
+
+    Built from three radial gaussian bands so the crescent has 3D depth:
+      - inner shadow ring (dark, hugs r_inner)
+      - mid fill body  (light grey, fills the bulk of the band)
+      - outer highlight rim (bright silver, hugs r_outer)
+    Bands blend smoothly into each other — no hard band boundaries.
+
+    Angular alpha tapers as sin(t*pi)^0.55, so opacity peaks at the
+    middle of the sweep and fades cleanly to zero at start_deg and
+    end_deg, giving the elegantly tapered crescent points.
+
+    Optional internal streaks add radial motion lines (slightly brighter
+    every ~10° of sweep) to convey direction of the swing.
+    """
+    out = img.convert("RGBA").copy()
+    op = out.load()
+    w, h = out.size
+    px, py = pivot
+
+    sweep = end_deg - start_deg
+    if abs(sweep) < 1.0 or r_outer <= r_inner:
+        return out
+
+    shadow_rgb, fill_rgb, hi_rgb = CRESCENT_PALETTES[palette]
+
+    x_min = max(0, int(px - r_outer - 1))
+    x_max = min(w, int(px + r_outer + 2))
+    y_min = max(0, int(py - r_outer - 1))
+    y_max = min(h, int(py + r_outer + 2))
+
+    band = r_outer - r_inner
+    for y in range(y_min, y_max):
+        for x in range(x_min, x_max):
+            dx = x - px
+            dy = y - py
+            r = math.sqrt(dx * dx + dy * dy)
+            if r < r_inner - 0.5 or r > r_outer + 0.5:
+                continue
+            # Wrap-aware angle test against [start_deg, end_deg].
+            angle = math.degrees(math.atan2(-dy, dx))
+            ang_local = None
+            for trial in (angle, angle + 360.0, angle - 360.0):
+                if min(start_deg, end_deg) <= trial <= max(start_deg, end_deg):
+                    ang_local = trial - start_deg
+                    break
+            if ang_local is None:
+                continue
+            t = ang_local / sweep  # 0..1 along the sweep
+            if t < 0.0 or t > 1.0:
+                continue
+
+            # Tapered angular profile — 0 at endpoints, 1 in the middle.
+            ang_alpha = math.sin(t * math.pi) ** 0.55
+            if ang_alpha <= 0.01:
+                continue
+
+            # Radial position 0..1 across the band.
+            rt = (r - r_inner) / band
+            rt = max(0.0, min(1.0, rt))
+
+            # Three gaussian peaks — shadow, fill, highlight.
+            s_w = math.exp(-((rt - 0.10) / 0.13) ** 2)
+            f_w = math.exp(-((rt - 0.50) / 0.32) ** 2)
+            h_w = math.exp(-((rt - 0.92) / 0.10) ** 2)
+            tot = s_w + f_w + h_w
+            if tot <= 0.001:
+                continue
+            r_alpha = min(1.0, tot)
+
+            # Weighted color blend.
+            cr = (shadow_rgb[0]*s_w + fill_rgb[0]*f_w + hi_rgb[0]*h_w) / tot
+            cg = (shadow_rgb[1]*s_w + fill_rgb[1]*f_w + hi_rgb[1]*h_w) / tot
+            cb = (shadow_rgb[2]*s_w + fill_rgb[2]*f_w + hi_rgb[2]*h_w) / tot
+
+            # Internal motion streaks — modulate brightness on the fill
+            # band only (don't disturb shadow/highlight bands).
+            if streaks and 0.18 < rt < 0.82:
+                # ~9 streaks across the sweep, biased bright.
+                phase = math.sin(t * 9.0 * math.pi)
+                if phase > 0.55:
+                    boost = (phase - 0.55) * 90.0  # +0..40 brightness
+                    cr = min(255, cr + boost)
+                    cg = min(255, cg + boost)
+                    cb = min(255, cb + boost)
+                elif phase < -0.55:
+                    dim = (-phase - 0.55) * 70.0  # -0..32 brightness
+                    cr = max(0, cr - dim)
+                    cg = max(0, cg - dim)
+                    cb = max(0, cb - dim)
+
+            final_alpha = int(max_alpha * ang_alpha * r_alpha)
+            if final_alpha <= 0:
+                continue
+
+            existing = op[x, y]
+            er, eg, eb, ea = existing
+            sa = final_alpha / 255.0
+            inv_sa = 1.0 - sa
+            nr = int(cr * sa + er * inv_sa)
+            ng = int(cg * sa + eg * inv_sa)
+            nb = int(cb * sa + eb * inv_sa)
+            na = max(ea, final_alpha)
+            op[x, y] = (nr, ng, nb, na)
+    return out
+
+
+def rotate_around(img: Image.Image, angle_deg: float,
+                   pivot: tuple[int, int]) -> Image.Image:
+    """Rotate img around the given pivot point on the canvas. Same-size
+    output. PIL's rotate uses NEAREST sampling (preserves pixel-art),
+    angle is positive CCW."""
+    return img.rotate(angle_deg, resample=Image.NEAREST,
+                       center=pivot, expand=False)
+
+
+def render_blade_swing_frame(weapon_static: Image.Image,
+                              prev_angle: float, curr_angle: float,
+                              pivot: tuple[int, int],
+                              ghost_count: int = 6,
+                              ghost_alpha: int = 110) -> Image.Image:
+    """Render the sword at curr_angle PLUS a motion-blur trail of N
+    ghost copies at angles linearly interpolated from prev_angle to
+    curr_angle. The ghosts are painted faintest (closest to prev) to
+    brightest (closest to curr), and the current sword sits on top.
+    Together the ghosts form the swept-arc trail.
+
+    The blade itself is what creates the arc — there is no separate
+    overlay shape. This is the classic action-game sword-slash effect.
+    """
+    canvas = Image.new("RGBA", weapon_static.size, (0, 0, 0, 0))
+    if abs(curr_angle - prev_angle) < 0.5:
+        # No real motion — just place sword at curr_angle, no trail.
+        return rotate_around(weapon_static, curr_angle, pivot)
+    # Ghost copies — paint from oldest (closest to prev_angle) to newest.
+    for k in range(ghost_count, 0, -1):
+        # t = 0 is at prev, t = 1 is at curr; we use t in (0, 1)
+        t = k / float(ghost_count + 1)
+        a_deg = prev_angle + t * (curr_angle - prev_angle)
+        ghost = rotate_around(weapon_static, a_deg, pivot)
+        # Alpha tapers: oldest ghosts are faintest.
+        ghost_a = (ghost_alpha * (1.0 - (1.0 - t) * 0.7)) / 255.0
+        ghost = apply_alpha(ghost, ghost_a)
+        canvas = Image.alpha_composite(canvas, ghost)
+    # Current sword — full alpha, on top.
+    current = rotate_around(weapon_static, curr_angle, pivot)
+    canvas = Image.alpha_composite(canvas, current)
+    return canvas
+
+
 def paint_motion_streak(img: Image.Image, x: int, y_start: int, y_end: int,
                          color: tuple[int, int, int],
                          max_alpha: int = 110) -> Image.Image:
@@ -360,9 +698,9 @@ def split_anim(piece: str, color: str, anim: str) -> dict:
                 "status": "size_mismatch",
                 "got": full_strip.size, "expected": (expected_w, FRAME)}
 
-    overlaps = WEAPON_OVERLAPS_BODY[piece]
+    overlaps = WEAPON_OVERLAPS_BODY.get(piece, False)
     extras = WEAPON_EXTRAS.get(piece, {}).get(anim, None)
-    glow_color = WEAPON_GLOW_COLOR[piece]
+    glow_color = WEAPON_GLOW_COLOR.get(piece, (255, 255, 255))
 
     full_frames = split_strip_to_frames(full_strip, n)
     body_frames = []
@@ -400,9 +738,61 @@ def split_anim(piece: str, color: str, anim: str) -> dict:
 
         body_frames.append(body_frame)
 
-        # Weapon frame: lockstep + extras + anim modifiers + glow burst
-        # at peak + motion streak for vertical-raise weapons.
-        weapon_frame = lock
+        # Weapon frame layers (in z-order from back to front):
+        #   1. lockstep  (the weapon image transformed in body-pose)
+        #      OR for swords during attack: rotated blade with
+        #      motion-blur ghost trail — this REPLACES lockstep
+        #   2. extras translate  (e.g., raised staff position at peak)
+        #   3. motion streak  (vertical glow trail — staves only)
+        #   4. tip glow burst  (radial flare at the weapon tip — peak)
+        #
+        # For sword pieces (BLADE_SWING) on the ATTACK animation, the
+        # blade itself rotates through the swing arc and the motion-blur
+        # ghosts of past angles form the slash trail. For non-attack
+        # anims (move/hit/death), the sword stays in lockstep with the
+        # body — no rotation, no swing.
+        blade_cfg = BLADE_SWING.get(piece) if anim == "attack" else None
+        crescent_cfg = CRESCENT_SLASH.get(piece) if anim == "attack" else None
+        if blade_cfg is not None:
+            angles = blade_cfg["attack_angles"]
+            curr_a = angles[i] if i < len(angles) else 0.0
+            prev_a = angles[i - 1] if i > 0 and i - 1 < len(angles) else curr_a
+            # Synthetic sword override — for pieces where weapon_static
+            # is transparent (sword baked into baseline). Built once
+            # per-piece in memory.
+            blade_img = weapon_img
+            synth = blade_cfg.get("synthetic")
+            if synth == "assassin_sword":
+                blade_img = make_synthetic_assassin_sword()
+            # Paint crescent FIRST so the blade rides on top of it.
+            weapon_frame = Image.new("RGBA", weapon_img.size, (0, 0, 0, 0))
+            if crescent_cfg is not None:
+                cf = crescent_cfg["attack_frames"]
+                if i < len(cf) and cf[i] is not None:
+                    weapon_frame = paint_crescent_slash(
+                        weapon_frame,
+                        pivot=crescent_cfg["pivot"],
+                        r_inner=cf[i]["r_inner"],
+                        r_outer=cf[i]["r_outer"],
+                        start_deg=cf[i]["start_deg"],
+                        end_deg=cf[i]["end_deg"],
+                        palette=crescent_cfg.get("palette", "silver"),
+                        max_alpha=cf[i]["max_alpha"],
+                    )
+            blade_frame = render_blade_swing_frame(
+                blade_img,
+                prev_angle=prev_a, curr_angle=curr_a,
+                pivot=blade_cfg["pivot"],
+                ghost_count=blade_cfg["ghost_count"],
+                ghost_alpha=blade_cfg["ghost_alpha"],
+            )
+            # Per-frame alpha (e.g., F0/F5 sheathed = invisible).
+            fa = blade_cfg.get("frame_alphas")
+            if fa is not None and i < len(fa) and fa[i] < 1.0:
+                blade_frame = apply_alpha(blade_frame, fa[i])
+            weapon_frame = Image.alpha_composite(weapon_frame, blade_frame)
+        else:
+            weapon_frame = lock
         if extras is not None and i < len(extras):
             ex_dx, ex_dy, glow_int = extras[i]
             if ex_dx or ex_dy:
@@ -456,13 +846,15 @@ def split_anim(piece: str, color: str, anim: str) -> dict:
 def main():
     pieces_with_weapons = [p for p, accs in PIECES_ACCESSORIES.items()
                             if any(a.weapon for a in accs)]
-    print(f"weapon-bearing pieces: {pieces_with_weapons}\n")
+    pieces_to_process = pieces_with_weapons + list(ARC_ONLY_PIECES)
+    print(f"weapon-bearing pieces: {pieces_with_weapons}")
+    print(f"arc-only pieces:       {list(ARC_ONLY_PIECES)}\n")
     print(f"{'piece':14s} {'color':5s} {'anim':6s} {'frames':3s} {'extras':6s} "
           f"{'diffs':6s} {'verify':6s}")
     print("-" * 60)
 
     fail = 0
-    for piece in pieces_with_weapons:
+    for piece in pieces_to_process:
         for color in ("white", "black"):
             for anim in ANIMS:
                 r = split_anim(piece, color, anim)

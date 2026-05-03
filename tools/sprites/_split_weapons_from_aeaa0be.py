@@ -62,7 +62,22 @@ WEAPON_OVERLAPS_BODY = {
     "queen": False,
     "king": False,
     "bandit_pawn": True,
+    # Arc-only — weapon_static is transparent so the lockstep mask is
+    # always empty and overlaps doesn't matter, but include for safety.
+    "assassin_bishop": False,
 }
+
+# Pieces with a weapon BAKED INTO THE BASELINE silhouette (not a
+# weapon=True accessory). The weapon static itself can't be cleanly
+# extracted from the baseline, but we still want a swing-arc overlay
+# during attack frames. For these pieces we generate:
+#   body_static.png   = byte-for-byte copy of aeaa0be:static.png
+#                       (no subtraction — weapon stays in the body)
+#   weapon_static.png = fully transparent 64x64 canvas
+# The arc-only weapon attack strip is then painted onto the empty
+# weapon canvas by _split_anim_weapons.py, layered on top of the
+# unchanged body in Godot. The body keeps its baked-in sword.
+ARC_ONLY_PIECES = ["assassin_bishop"]
 
 
 def restore_aeaa0be_static(piece: str, color: str, dst: Path):
@@ -195,6 +210,26 @@ def split_piece(client, piece: str) -> dict:
     return {"piece": piece, "status": "ok", "counts": counts}
 
 
+def split_arc_only(piece: str) -> dict:
+    """Generate body_static.png + transparent weapon_static.png for a
+    piece whose weapon is baked into the baseline silhouette (e.g.,
+    assassin_bishop's sword). No accessory subtraction; the body keeps
+    its original silhouette intact."""
+    print(f"\n=== {piece} (arc-only — weapon baked into baseline) ===")
+    for color, src_dir in (("white", WHITE_DIR), ("black", BLACK_DIR)):
+        static_path = src_dir / piece / "static.png"
+        body_path = src_dir / piece / "body_static.png"
+        weapon_path = src_dir / piece / "weapon_static.png"
+        # Restore canonical aeaa0be:static.png.
+        restore_aeaa0be_static(piece, color, static_path)
+        # body_static = byte-for-byte copy of static.png.
+        Image.open(static_path).convert("RGBA").save(body_path)
+        # weapon_static = fully transparent canvas.
+        Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(weapon_path)
+        print(f"  {color:5s}  body=copy of static  weapon=transparent canvas")
+    return {"piece": piece, "status": "ok"}
+
+
 def main():
     client = load_client()
     print(f"[pixellab] balance: {client.get_balance()}")
@@ -203,14 +238,21 @@ def main():
     pieces_with_weapons = [p for p, accs in PIECES_ACCESSORIES.items()
                             if any(a.weapon for a in accs)]
     print(f"weapon-bearing pieces: {pieces_with_weapons}")
+    print(f"arc-only pieces: {ARC_ONLY_PIECES}")
     for piece in pieces_with_weapons:
         results.append(split_piece(client, piece))
+    for piece in ARC_ONLY_PIECES:
+        results.append(split_arc_only(piece))
 
     print("\n=== SUMMARY ===")
     fail = 0
     for r in results:
         if r["status"] != "ok":
             print(f"  {r['piece']:14s}  {r['status']}")
+            continue
+        if "counts" not in r:
+            # Arc-only piece — no subtraction stats to report.
+            print(f"  {r['piece']:14s}  arc-only (body=copy, weapon=transparent)")
             continue
         for color, c in r["counts"].items():
             tag = "PASS" if c["non_weapon_diffs"] == 0 else "FAIL"

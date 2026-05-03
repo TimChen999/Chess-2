@@ -501,6 +501,207 @@ and the anim is `attack`; falls back to uniform otherwise.
   below the new tip showing where the orb just came from. Length
   matches the raise distance; alpha tapers linearly toward zero.
 
+### 5f. Pixel-art crescent slash + blade rotation (sword pieces)
+
+For sword pieces (`bandit_pawn`, `assassin_bishop`) on the **attack**
+animation, the weapon overlay is two stacked layers, both painted onto
+the weapon canvas before any modifiers run:
+
+1. **Crescent slash** (bottom layer) — a bold, hand-drawn-looking
+   swoosh of three discrete radial tones with tapered angular ends and
+   internal motion streaks. This is the visually dominant element —
+   the slash effect itself, not a faint trail behind something else.
+2. **Rotating blade with ghost trail** (top layer) — the sword image
+   is rotated around a pivot at the wielder's hand to a per-frame
+   angle, accompanied by 6–7 alpha-tapered ghost copies linearly
+   interpolated from the previous frame's angle. The blade rides on
+   the leading edge of the crescent.
+
+Lockstep, extras, and motion-streak code paths from §5e do **not**
+apply on the attack frames of swing-armed pieces — the lockstep weapon
+is replaced wholesale by the crescent + blade composite. Move/hit/death
+still use lockstep transforms (no rotation, no crescent).
+
+**Crescent painter** — `paint_crescent_slash()` in
+[_split_anim_weapons.py](_split_anim_weapons.py):
+
+- Inputs: `pivot=(px, py)`, `r_inner`, `r_outer`, `start_deg`,
+  `end_deg`, `palette`, `max_alpha`. Angle convention: 0° = +x (right),
+  90° = -y (up), wrap-aware against `[start, end]`.
+- For each pixel in the bounding box of the outer radius:
+  - Compute polar `(r, θ)` from the pivot.
+  - Reject pixels outside `[r_inner, r_outer]` and outside the angular
+    sweep.
+  - **Angular taper** — `ang_alpha = sin(t·π)^0.5` where `t ∈ [0, 1]`
+    is the position along the sweep. This gives the elegantly tapered
+    crescent points seen in classic action-game sprite work — opacity
+    peaks at the middle of the sweep and fades cleanly to zero at the
+    endpoints. The `^0.5` power keeps the middle plateau wide so the
+    crescent reads as solid rather than diamond-shaped.
+  - **Discrete radial bands** — three flat tones, hard edges:
+
+    | radial position `rt` | tone | role |
+    |---|---|---|
+    | `[0.00, 0.22)` | `(45, 55, 75)` | inner shadow (dark, hugs `r_inner`) |
+    | `[0.22, 0.78)` | `(190, 195, 210)` | mid fill body |
+    | `[0.78, 1.00]` | `(248, 250, 255)` | outer highlight rim |
+
+    No gaussian blending between bands — the crescent posterizes
+    cleanly into three stripes when zoomed in.
+  - **Streak markers** — every 22° of sweep, a one-pixel-wide radial
+    line in the mid band gets bumped to `(225, 230, 245)` (one tone
+    brighter than fill). Reads as motion-direction hash marks inside
+    the crescent body.
+  - **Alpha quantization** — final alpha snaps to `{0, 96, 192, 255}`
+    so the crescent edges read as crisp pixel-art tones, not as a soft
+    anti-aliased gradient. Without this the discrete bands gain a
+    fuzzy halo that breaks the pixel-art aesthetic.
+
+**Per-piece per-frame config** — `CRESCENT_SLASH[piece]` table:
+
+```python
+CRESCENT_SLASH = {
+    "bandit_pawn": {
+        "pivot": (32, 46),
+        "palette": "silver",
+        "attack_frames": [
+            None,  # F0 rest
+            None,  # F1 wind-up
+            {"r_inner": 8,  "r_outer": 22, "start_deg":  85, "end_deg": 165, "max_alpha": 145},  # F2 forming
+            {"r_inner": 7,  "r_outer": 30, "start_deg": -50, "end_deg": 145, "max_alpha": 235},  # F3 PEAK
+            {"r_inner": 7,  "r_outer": 26, "start_deg": -85, "end_deg":  20, "max_alpha": 175},  # F4 follow-through
+            None,  # F5 settle
+        ],
+    },
+    "assassin_bishop": {...},  # same shape, slightly larger sweep
+}
+```
+
+`None` → no crescent on that frame. The peak frame sweeps ~195° (more
+than half a circle) so the crescent visually dominates the attack
+silhouette.
+
+**Blade rotation + ghost trail** — `render_blade_swing_frame()` in
+[_split_anim_weapons.py](_split_anim_weapons.py):
+
+- Inputs: `weapon_static`, `prev_angle`, `curr_angle`, `pivot`,
+  `ghost_count`, `ghost_alpha`.
+- Paints `ghost_count` rotated copies at angles linearly interpolated
+  from `prev_angle` to `curr_angle`, alpha-tapered from faintest
+  (oldest) to most opaque (newest).
+- Paints the current sword on top at full alpha.
+- Uses PIL `rotate(NEAREST, center=pivot, expand=False)` so pixels
+  preserve their hard-edged style during rotation.
+
+**Per-piece angles** — `BLADE_SWING[piece]["attack_angles"]` (degrees,
+positive CCW):
+
+```python
+"bandit_pawn": [0, 35, 55, -55, -85, 0]  # rest → wind-up → wind-up peak → SLASH → follow-through → rest
+```
+
+The big jump from `+55°` (F2) to `-55°` (F3) is the swing — it covers
+110° in one frame, and the 6 ghost copies fan out across that arc to
+form the multi-exposure trail riding on the crescent.
+
+**Ordering inside the per-frame loop** (in `split_anim()`):
+
+```python
+weapon_frame = Image.new("RGBA", weapon_img.size, (0, 0, 0, 0))
+if crescent_cfg present and frame has crescent:
+    weapon_frame = paint_crescent_slash(weapon_frame, ...)
+blade_frame = render_blade_swing_frame(blade_img, prev_a, curr_a, ...)
+weapon_frame = Image.alpha_composite(weapon_frame, blade_frame)
+```
+
+Crescent first, blade on top — the blade reads as the leading edge of
+the slash, and the crescent reads as the trailing visual punch.
+Anim modifiers (HIT_FLASH / ATTACK_FLASH / DEATH_ALPHAS) are still
+applied after — same per-anim post-pass as every other weapon-bearing
+piece.
+
+### 5g. Arc-only pieces (sword baked into baseline)
+
+`assassin_bishop` is added to the layered pipeline via a new
+**arc-only** path: its sword is baked into the baseline silhouette
+behind a diagonal sash, with only ~10 visible pixels above the sash.
+Extracting a clean sword sprite from such a thin slice isn't viable.
+Instead:
+
+- `body_static.png` = a copy of `aeaa0be:static.png` (sword baked in).
+- `weapon_static.png` = a transparent canvas (no sword on disk).
+- `body_<anim>.png` = transformed `body_static` per `POSES[anim]` — so
+  the body is byte-identical to `aeaa0be:<anim>.png` everywhere
+  outside the weapon's lockstep mask.
+- `weapon_<anim>.png` for `attack` = crescent + rotating **synthetic**
+  sword (built procedurally by `make_synthetic_assassin_sword()`,
+  64×64 RGBA, sword laid out vertically with pivot at `(32, 50)` —
+  blade body, gold crossguard, dark wood grip, gold pommel). The
+  synthetic sword is drawn from the sheath on F1 (`frame_alpha = 1.0`)
+  and resheathed on F5 (`frame_alpha = 0.0`).
+- `weapon_<anim>.png` for `move`/`hit`/`death` = empty canvas (no
+  visible sword — the baked-in sheathed one stays in the body).
+
+The list of arc-only pieces is in `ARC_ONLY_PIECES` (in
+[_split_weapons_from_aeaa0be.py](_split_weapons_from_aeaa0be.py)) and
+parallel `pieces_with_weapons + ARC_ONLY_PIECES` iteration in
+[_split_anim_weapons.py](_split_anim_weapons.py). The `synthetic` key
+in `BLADE_SWING[piece]` selects which procedural blade builder to use
+(`"assassin_sword"` → `make_synthetic_assassin_sword()`).
+
+### 5h. Verification — visual + pixel-perfect
+
+- **Pixel-perfect baseline preservation** — for both arc-only and
+  regular weapon-bearing pieces, `_split_anim_weapons.py` re-runs the
+  per-frame body-subtract verification: `body_<anim>.png` must match
+  `aeaa0be:<anim>.png` byte-for-byte everywhere outside the weapon's
+  lockstep mask. 56/56 verifications PASS for the current set
+  (5 weapon-bearing pieces + assassin_bishop, ×2 colors, ×4 anims).
+- **Visual character check** — three throwaway preview scripts under
+  `tools/sprites/`:
+  - `_render_attack_preview.py` — 6× scale grid: body strip / weapon
+    overlay / composite, all 6 attack frames per piece. Use to spot
+    macro issues (crescent missing, blade orientation wrong, layering
+    inverted).
+  - `_inspect_peak_slash.py` — 12× scale single-frame view of F2/F3/F4
+    per piece. Use to verify the discrete radial bands posterize
+    cleanly and the streak markers read.
+  - `_inspect_assassin_bishop.py` — text-art dump of the
+    assassin_bishop static showing where the sword pixels land in the
+    silhouette (used originally to decide between sword extraction vs.
+    arc-only synthetic).
+
+### 5i. What didn't work — crescent slash iteration
+
+Three earlier attempts during this iteration; recording them so a
+future Claude doesn't re-run the same dead ends.
+
+- **Subtle translucent annulus** (rejected) — first cut of
+  `paint_arc_swing` painted a thin annular ring with a single grey
+  color and gaussian radial taper, alpha ~120. Result: faint wisps,
+  nothing like the reference's bold crescents. Doubling alpha didn't
+  help — the shape was wrong, not just the opacity.
+- **Pure blade rotation, no crescent** (rejected) — replaced the
+  overlay with just `render_blade_swing_frame()` (rotating blade +
+  ghost trail). At ghost_count=6 the result reads as a multi-exposure
+  fan of discrete sword copies, not a continuous painted swoosh. The
+  user's reference clearly shows a single solid crescent shape, not a
+  strobe of swords. The blade-rotation effect is good as a **leading
+  edge** but isn't sufficient on its own.
+- **Gaussian-blended crescent + blade** (rejected — too soft) — first
+  proper crescent painter used three gaussian peaks across the radial
+  band (`exp(-((rt - peak)/σ)²)`) and color-blended them by relative
+  weight. The result was 3D-shaded but had a soft, gradient-y feel
+  that didn't match the discrete-pixel-art style of the rest of the
+  set. Also the soft alpha fringe smeared the crescent edges into
+  surrounding pixels.
+
+The shipped approach (§5f) replaces the gaussian peaks with **hard
+band lookups** (`if rt < 0.22 → shadow; elif rt < 0.78 → fill; else →
+highlight`) and **quantizes the final alpha** to `{0, 96, 192, 255}`
+so the crescent reads as a deliberate three-tone pixel-art shape with
+crisp edges, matching the reference's hand-drawn feel.
+
 ---
 
 ## 6. Ability VFX
