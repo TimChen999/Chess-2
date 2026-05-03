@@ -10,6 +10,9 @@
 __pycache__/
 *.pyc
 
+# PixelLab inpaint cache (regeneratable, large)
+tools/sprites/_pixellab_cache/
+
 # Godot 4 editor cache & import data
 godot/.godot/
 godot/.import/

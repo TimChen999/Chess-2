@@ -3,6 +3,11 @@
     "playwright": {
       "command": "npx",
       "args": ["-y", "@playwright/mcp@latest", "--headless", "--browser", "chromium", "--allow-unrestricted-file-access"]
+    },
+    "pixellab": {
+      "command": "npx",
+      "args": ["-y", "@pixellab/mcp@latest"],
+      "env": { "PIXELLAB_API_KEY": "${env:PIXELLAB_API_KEY}" }
     }
   }
 }

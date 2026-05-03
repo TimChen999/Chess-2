@@ -36,7 +36,7 @@ To install the MCP:
 | [restyle_cape.py](restyle_cape.py) | example of repainting a PixelLab feature into suite palette |
 | [gen_sprites.py](gen_sprites.py) | provides `recolor_to_black()` (white → black recolor for the black sibling, after the white inpaint is final) |
 
-**Suite palette** (must match exactly across all new art):
+**Suite palette** — the four base colors all body silhouettes use:
 
 ```python
 OUTLINE   = (40, 40, 50, 255)     # 1-pixel dark outline + small accents
@@ -45,51 +45,148 @@ SHADOW    = (210, 208, 200, 255)  # right-edge shadow band
 HIGHLIGHT = (130, 128, 138, 255)  # secondary accent (e.g., cross-arm top, blade highlight)
 ```
 
+**Accent palette** — saturated colors usable for *small accessory
+items only* (a hood, saddle blanket, banner, mitre band, gem, glow,
+dagger mark). The set spans the rainbow so pieces read distinctly —
+each piece picks 1–2 accent colors that fit its role:
+
+```python
+# Cool / arcane
+BLUE          = ( 76, 124, 196, 255)  # arcane cavalry, frost robes
+BLUE_SHADOW   = ( 42,  78, 138, 255)
+TEAL          = ( 70, 168, 162, 255)  # enchantress, mist
+TEAL_SHADOW   = ( 38, 110, 108, 255)
+
+# Warm / fire / blood
+CRIMSON       = (190,  60,  72, 255)  # battle-wizard, fire-mage, bandit
+CRIMSON_SHADOW= (132,  32,  44, 255)
+
+# Nature / apprentice
+GREEN         = ( 96, 156,  78, 255)  # apprentice mage, druid
+GREEN_SHADOW  = ( 56, 100,  44, 255)
+
+# Royal / archmage
+PURPLE        = (126,  91, 176, 255)  # archmage, ceremonial
+PURPLE_SHADOW = ( 74,  52, 117, 255)
+
+# Metals / glow
+GOLD          = (217, 178,  60, 255)  # crown trim, gems, orbs
+GOLD_SHADOW   = (156, 122,  32, 255)
+SILVER        = (192, 196, 210, 255)  # rune marks, magic etching
+PINK_GLOW     = (228, 122, 200, 255)  # arcane glow (unicorn horn, etc.)
+```
+
 ---
 
 ## 2. Theme overview
 
-Each piece is a member of a wizards' guild. Keep the silhouette of the
-existing piece intact; add 1–2 small themed accessories (≤15 OUTLINE
-pixels, ≤8 HIGHLIGHT pixels) so the set stays cohesive and readable
-at sprite scale.
+Each piece is a member of a wizards' guild. The change is **on the body
+and around it** (clothes + held items + a small banner / saddle / sash),
+**not on the head**. The head silhouette stays exactly as it is —
+don't add hats, don't paint mitre bands, don't recolor crowns.
 
-| piece | role | accessory to add | replaces |
-|---|---|---|---|
-| **pawn** | apprentice mage | tiny 4-point star on chest (5–7 px) | — (currently plain) |
-| **knight** | arcane cavalry | small runic mark on horse's flank (4–6 px) | — |
-| **bishop** | **wizard** | **5-point star on mitre face**, embossed 2-tone (replace current cross) | the Latin cross |
-| **rook** | mage tower | small orb sitting in the center crenellation (3 px) | — |
-| **queen** | high enchantress | small gem in the center crown spike (1–2 px) | — |
-| **king** | archmage | **orb-of-power** (just an orb, no cross) on top of the head | the cross-on-orb |
-| **bandit_pawn** | hood-mage thief | small dagger-rune mark on the cape (3–5 px) | — (cape stays) |
-| **alter_knight** | arcane unicorn | single HIGHLIGHT pixel at the horn tip (1 px) | — |
-| **assassin_bishop** | battle-wizard | star on mitre (inherits from bishop change) + sword stays | — |
+### 2.1 What stays untouched
 
-**Visual budget at 64×64**: each accessory is 5–15 pixels. More than
-that and the body fights for attention.
+- **Silhouette**: the existing alpha mask of every piece is preserved
+  byte-for-byte. The only exception is the king, whose cross-on-orb
+  is replaced with a single orb (silhouette intentionally drops the
+  cross arms — see §3 special step).
+- **Head region** (top portion of each piece — the "face area" listed
+  per-piece below): cream-white interior + dark outline stay as-is.
+  *Tiny* crown details (a single gem on king/queen) are allowed if
+  they're truly small and clearly secondary to the body changes.
+- **Body interior** is cream-white (FILL/SHADOW) by default.
+  Accent-color paint lands only inside the per-piece accent zones
+  defined in `wizard_statics.py`.
+
+### 2.2 What changes (per piece — the bulk of the work)
+
+Each piece gets **clothes + a held accessory**, painted on the body /
+chest / lower-body region. Held items (staff, wand, scepter, sword,
+dagger) may extend slightly outside the silhouette to the side or
+below — the same way the existing assassin_bishop's sword does.
+
+| piece | role | head region (DON'T touch) | body / clothes / accessory (DO paint) | accent colors |
+|---|---|---|---|---|
+| **pawn** | apprentice mage | round head (top ~30%) | small spellbook held at chest, short green cloak draped from shoulders down the sides | GREEN + GOLD |
+| **knight** | arcane cavalry | horse face + ears | blue saddle blanket on the horse's back with a small silver rune on it | BLUE + SILVER |
+| **bishop** | **wizard** | mitre (top ~30%) | tall wizard staff with a gold orb on top, held vertically alongside the body (extends outside silhouette to one side); thin purple sash at the waist | PURPLE + GOLD |
+| **rook** | mage tower | crenellation row (top ~12%) | crimson banner ribbon hanging vertically down one side of the tower (extends outside silhouette); small gold magical etching at mid-tower | CRIMSON + GOLD |
+| **queen** | high enchantress | crown peaks + collar (top ~30%) | small scepter held at the side (extends outside silhouette), thin teal sash on the gown lower body. *Tiny* teal gem on the central crown spike is OK as a small secondary detail | TEAL + GOLD |
+| **king** | archmage | crown structure (replaced — see special step) | long white beard hanging from the face down the upper chest, scepter held at the side (extends outside silhouette), gold sash on the lower body. **Special**: replace the cross-on-orb with a single gold orb-of-power | GOLD + PURPLE |
+| **bandit_pawn** | hood-mage thief | hooded head | dagger held at chest level on the body, small crimson rune on the dagger blade. Cape stays as-is (don't repaint it) | CRIMSON + SILVER |
+| **alter_knight** | arcane unicorn | horse face + horn (the horn itself stays cream — only its very tip glows) | blue saddle blanket with a small silver harness strap. *Very tiny* pink-magenta glow at the horn's apex (1–2 px max) is OK as a small secondary detail | BLUE + PINK_GLOW |
+| **assassin_bishop** | battle-wizard | mitre (top ~30%) | sword stays. Add a thin crimson sash across the body at the level the sword crosses, plus a small gold belt buckle on the sash | CRIMSON + GOLD |
+
+### 2.3 Visual budget at 64×64
+
+- **Body accent items**: 1–2 per piece, each occupying ~30–80 pixels
+  inside the body region (NOT in the head region). The body's cream
+  interior should still cover the majority of the body — accent
+  pixels < ~30% of total interior.
+- **Held items extending outside silhouette**: ≤ ~50 px of new
+  silhouette outside the original (a thin staff or scepter is fine; a
+  full second body is not).
+- **Head detail (only king, queen)**: ≤ 3 accent pixels in the head
+  region.
+- The dark navy OUTLINE on the body silhouette boundary is preserved
+  exactly.
 
 ---
 
 ## 3. Per-piece workflow
 
-For **each piece** below, follow this loop:
+The approach is **layered accessories + a light body-texture pass**.
+The original chess piece silhouette is **never modified** (except the
+king, whose cross is pre-cleared so the orb-of-power can sit on top).
+Wizard items are generated as isolated transparent-background PNGs and
+composited onto the original.
 
-1. **Look at the current sprite** at `godot/assets/sprites/anim/pieces/white/<piece>/static.png`. It is your reference for silhouette + body.
-2. **Decide accessory placement** by reading the existing pixels (e.g. the bishop's mitre face is rows 5–13; that's where the star goes).
-3. **Add the accessory** via PixelLab inpaint. Build a mask covering only the accessory region (e.g. the mitre face for the bishop's star, the head crown for the king's orb-of-power). Prompt with the suite palette spelled out and the accessory shape described concretely (e.g. *"small 5-point star embossed on the bishop's mitre, dark outline plus light highlight on upper-left, cream-white pixel-art chess piece, suite palette of dark navy outline + cream interior"*). Iterate guidance 9–10. Score each candidate on `body_identity` outside the mask (must stay 1.0000) + dark-pixel count inside the mask (must land in the per-piece budget below). Reject and re-roll candidates that fail.
-4. **Recolor black** via `gen_sprites.recolor_to_black()` and save to `black/<piece>/static.png`.
-5. **VERIFY** (next section). Do not move on until verification passes.
+For each piece:
 
-### Special steps
+1. **Body texture pass (procedural).** Take the original cream-white
+   sprite and add a *subtle* shading bump: a 1-pixel HIGHLIGHT band
+   along the upper-left silhouette boundary (cool reflected light) and
+   widen the existing right-edge SHADOW band by 1 px. Suite palette
+   only — no accent colors here. This gives the body more sculptural
+   depth without changing the silhouette. Procedural, deterministic,
+   no API call.
 
-**Bishop cross → star**:
-- Remove existing cross pixels (find OUTLINE/HIGHLIGHT pixels in mitre rows 8–19, set them back to FILL).
-- Paint a 5-point star centered at the mitre face (~9 px in OUTLINE, ~3 px in HIGHLIGHT for embossed look). Same shading rule as the current cross: top-left edge = HIGHLIGHT, bottom-right = OUTLINE.
+2. **Per-accessory generation (PixelLab pixflux).** For each accessory
+   listed for the piece in §2.2:
+   - `description = "<accessory>, dark black outline, isolated single object, transparent background, pixel art at 64x64"`
+   - `negative_description = "chess piece, person, full body, hand, multiple objects, second <type>"`
+   - `image_size = {"width": 64, "height": 64}`
+   - `no_background = True`
+   - `init_image = None`, `init_image_strength = 0` (let the prompt fully drive)
+   - `text_guidance_scale = 12.0`
+   - `seed = <varied>` for re-rolls
+   The output is a 64×64 transparent-background image containing just
+   the accessory.
 
-**King cross-on-orb → orb-of-power**:
-- The current king's silhouette includes the cross extending up from a small orb. Replace the cross part with a larger 3×3 or 4×4 orb (filled circle) sitting where the cross used to be.
-- Mask the top region (head + cross) and inpaint with PixelLab: prompt for *"a single round dark orb-of-power resting on top of the king's head, no cross, no plus-sign, pixel art, suite palette."* Verify the new silhouette has no cross arms (no thin 1-px-wide rows above the orb).
+3. **Snap accessory outline.** Any near-black pixel in the accessory
+   (`max channel < 80`) is snapped to the exact suite `OUTLINE = (40,40,50,255)`
+   so accessory outlines visually match the piece's existing outline.
+
+4. **Composite accessory.** Find the bbox of opaque pixels in the
+   accessory result. If the bbox doesn't match the per-accessory
+   target size (within ±20%), reject the seed and re-roll. Otherwise
+   resize-by-nearest to the target size, translate so the accessory's
+   bbox center hits the per-accessory anchor on the piece canvas, and
+   alpha-composite onto the piece. Repeat for each accessory in z-order.
+
+5. **Save white + black.** The same accessory PNG composites onto both
+   teams' baselines — the accessory has its own outline + colors that
+   read on cream and dark bodies alike.
+
+### Special step — King cross-on-orb → orb-of-power
+
+Pre-clear the cross from the king sprite **before** compositing
+accessories. Find the king's "first wide row" (where the head
+silhouette becomes ≥ 6 px wide) and erase every opaque pixel above
+that row to transparent. Then composite the orb-of-power accessory
+onto the cleared head. The silhouette is allowed to drop the cross
+arms (this is the only piece where silhouette changes).
 
 ---
 
@@ -102,44 +199,62 @@ this gate.
 ### 4a. Mechanical checks (script them)
 
 ```python
-# Pseudocode — write a small verifier that loads the pre-change sprite
-# and the inpainted result, then asserts:
-- silhouette outside-of-feature region is byte-identical to the
-  pre-change sprite (body_identity = 1.0000)
-- accessory pixel count is within budget (5–15 dark)
-- bilateral symmetry of HEAD region (where applicable) ≥ 0.95
-- white/black recolor masks match at 100%
-- only suite-palette colors present (no stray RGB values from the
-  PixelLab inpaint — if any leak through, run the result through
-  restyle.py to snap to the suite palette)
+# Pseudocode — load the original baseline sprite and the composited
+# result, then assert:
+
+# Silhouette preservation — the layered approach guarantees the
+# original's body silhouette by construction. Verification just
+# confirms we didn't accidentally erase it.
+- body_silhouette_intersection ≥ 0.99   # original silhouette pixels
+    # are still opaque in the result (excludes the silhouette
+    # extensions added by accessories like staffs)
+- head_silhouette_intersection ≥ 0.95   # original head pixels still
+                                        # opaque in result (king
+                                        # exempt — cross is cleared)
+
+# Accessory presence — each piece's accessory zone has saturated /
+# accent-colored pixels.
+- accessory_pixel_count ≥ piece's accessory_min   # at least N opaque
+    # pixels in the accessory bbox region that came from the
+    # accessory composite (i.e. not in the original sprite)
+
+# Outline cleanness — accessory outlines were snapped to suite OUTLINE.
+- no near-black pixels at non-OUTLINE RGB values
+
+# Twin parity — same accessory, both teams.
+- accessory_alpha_diff(white_result, black_result) == 0
 ```
 
 ### 4b. Visual character check (read the file with your image tool)
 
-Open the new white sprite and the new black sprite. Ask yourself:
+After every regeneration, **open the new white sprite and look at its
+head region first**. The head silhouette should match the original
+within ~1–2 pixels of margin (PixelLab redraws the whole sprite, so
+small shape-edge tweaks are fine, but the head should still be
+recognizably the same chess-piece head). Then ask:
 
-- **Identity**: Can I tell at a glance what role this piece plays
-  (apprentice / wizard / archmage / mage tower / etc.) without looking
-  at file names?
-- **Theme cohesion**: Does the accessory feel like it belongs to a
-  wizards' guild (stars, runes, orbs, gems) — not a knight order or
-  religious order?
-- **Suite consistency**: Is the rendering style (outline weight,
-  shading direction, fill color) identical to the unchanged pieces?
-- **Readable at small size**: Squint at the sprite. Is the silhouette
-  + accessory still distinguishable? If the accessory disappears at
-  squint distance, it's too subtle.
-- **Centered**: Is the accessory snapped to the body's actual visual
-  center, not the inpaint mask's bbox center? Score candidates by the
-  X-distance from accessory centroid to body centroid for the head row
-  range, and re-roll with a tighter mask if it lands more than 1 px off.
+- **Head intact**: Does the head still read as the original piece's
+  head? Pawn = round head, knight = horse profile, bishop = pointed
+  mitre, queen = crown, king = orb-of-power (replaced cross), rook =
+  battlements, etc. If the head drifted (mitre lost its point, horse
+  lost its mane, etc.), bump `init_image_strength` and re-roll.
+- **Body items show clearly**: Can you see the staff / book / sword /
+  cloak / sash / etc. listed for that piece? If the prompt items are
+  missing or buried, drop strength slightly and re-roll.
+- **Body cream is clean**: After the cream-snap pass, the body's
+  cream-white is exact suite cream (no pink/yellow tint). If the snap
+  produced patchy results, bump strength.
+- **Theme cohesion**: Multi-color across the set (one piece should
+  not just clone another's accent palette).
+- **Readable at small size**: Squint at the sprite. Silhouette + body
+  items still distinguishable.
 
 ### 4c. Side-by-side diff
 
 For each changed piece, save a temporary side-by-side image:
-**[unchanged previous sprite] | [new themed sprite] | [silhouette diff
-overlay]**. Confirm the silhouette is identical except where the
-accessory replaced/added pixels.
+**[original sprite] | [regenerated sprite] | [head-region overlay]**.
+Confirm the head is recognizably the same piece and the body now has
+the wizard items.
 
 **If any check fails, fix the sprite before moving on.** Don't ship a
 partially-themed set.
