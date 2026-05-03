@@ -187,22 +187,22 @@ def body_texture_pass(img: Image.Image, color: str = "white") -> Image.Image:
 # ---------------------------------------------------------------------------
 
 def pre_clear_king_cross(img: Image.Image) -> Image.Image:
-    """Erase rows above the king's first wide row (the cross+bauble
-    structure on top), so the orb accessory has a clean head to sit on."""
+    """Erase the entire cross-on-orb structure on top of the king. The
+    king silhouette goes (top to bottom): thin cross top → bauble (5–7
+    px wide) → thin cross stem → body (>= 14 px wide). The previous
+    "first wide row after thin row" heuristic stopped at the bauble
+    (~row 3), leaving the bauble + lower stem intact below the orb. We
+    now find the first row where the silhouette is BODY-wide (>= 14 px)
+    and clear everything above it — that wipes the full cross+bauble
+    structure cleanly so the orb has a fresh head to sit on."""
     out = img.copy()
     op = out.load()
     sm = alpha_mask(img)
     bb = silhouette_bbox(img)
     sx0, sy0, sx1, sy1 = bb
-    widths = [len(row_xs(sm, y)) for y in range(sy0, min(sy0 + 16, len(sm[0])))]
     cut_y = sy0
-    found_thin = False
-    for i, wrow in enumerate(widths):
-        y = sy0 + i
-        if wrow <= 4:
-            found_thin = True
-            cut_y = y
-        elif found_thin and wrow >= 6:
+    for y in range(sy0, min(sy0 + 20, len(sm[0]))):
+        if len(row_xs(sm, y)) >= 14:
             cut_y = y
             break
     for y in range(0, cut_y):
@@ -285,11 +285,8 @@ def snap_outline(img: Image.Image) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 def mirror_symmetric(img: Image.Image) -> Image.Image:
-    """For each (x, y) in the image: if exactly one of the two mirror
-    columns (around the image's vertical center) is opaque, copy the
-    opaque pixel to the transparent side. Fills small asymmetric holes
-    in vertically-symmetric items like the cross — typically adds 1–4
-    pixels."""
+    """For each (x, y): if exactly one mirror column is opaque, copy the
+    opaque pixel to the transparent side. Fills small asymmetric holes."""
     w, h = img.size
     out = img.copy()
     op = out.load()
@@ -308,14 +305,46 @@ def mirror_symmetric(img: Image.Image) -> Image.Image:
     return out
 
 
+def full_symmetrize(img: Image.Image) -> Image.Image:
+    """Force bilateral symmetry: pick whichever side of each row has
+    more opaque pixels as the source-of-truth, then mirror it to the
+    other side. Guarantees perfectly symmetric output (for items that
+    should be symmetric, e.g. the king's orb)."""
+    w, h = img.size
+    out = img.copy()
+    op = out.load()
+    src = img.load()
+    cx = w // 2
+    for y in range(h):
+        left_op = sum(1 for x in range(cx) if src[x, y][3] >= ALPHA_THRESH)
+        right_op = sum(1 for x in range(cx, w) if src[x, y][3] >= ALPHA_THRESH)
+        if left_op >= right_op:
+            # mirror left to right
+            for x in range(cx):
+                mx = w - 1 - x
+                if 0 <= mx < w:
+                    op[mx, y] = src[x, y]
+        else:
+            # mirror right to left
+            for x in range(cx, w):
+                mx = w - 1 - x
+                if 0 <= mx < w:
+                    op[mx, y] = src[x, y]
+    return out
+
+
 def composite_accessory(piece_img: Image.Image, accessory_img: Image.Image,
                         anchor_xy: tuple[int, int],
                         target_w: int, target_h: int,
-                        symmetric: bool = False) -> Image.Image:
+                        symmetric: bool = False,
+                        full_sym: bool = False) -> Image.Image:
     """Crop accessory to its opaque bbox, resize-nearest to target
-    dimensions, optionally mirror-fill missing symmetry pixels, paste
-    at anchor (so the resized accessory's center sits at anchor_xy),
-    alpha-composite onto piece_img. Returns a NEW image."""
+    dimensions, optionally symmetrize, paste at anchor, alpha-composite.
+
+    symmetric: fill mirror-asymmetric holes only.
+    full_sym: enforce perfect bilateral symmetry (use whichever side
+        has more opaque pixels as ground truth, mirror to other side).
+    """
     bb = opaque_bbox(accessory_img)
     if bb is None:
         return piece_img.copy()
@@ -323,7 +352,9 @@ def composite_accessory(piece_img: Image.Image, accessory_img: Image.Image,
     cropped = accessory_img.crop((ax0, ay0, ax1 + 1, ay1 + 1))
     if (cropped.size[0], cropped.size[1]) != (target_w, target_h):
         cropped = cropped.resize((target_w, target_h), Image.NEAREST)
-    if symmetric:
+    if full_sym:
+        cropped = full_symmetrize(cropped)
+    elif symmetric:
         cropped = mirror_symmetric(cropped)
     pw, ph = piece_img.size
     cw, ch = cropped.size
@@ -334,14 +365,17 @@ def composite_accessory(piece_img: Image.Image, accessory_img: Image.Image,
     return Image.alpha_composite(piece_img.convert("RGBA"), layer)
 
 
-def restamp_body_outline(composed: Image.Image, baseline: Image.Image) -> Image.Image:
+def restamp_body_outline(composed: Image.Image, baseline: Image.Image,
+                         color: str = "white") -> Image.Image:
     """Walk the BASELINE silhouette boundary and force every boundary
-    pixel to be exactly OUTLINE color in the composed result. This
-    restores the body's 1-pixel dark outline if any accessory composite
-    painted over it.
+    pixel to be exactly the team's OUTLINE color in the composed
+    result. Restores the body's 1-pixel dark outline if any accessory
+    composite painted over it.
 
-    Pixels OUTSIDE the baseline silhouette are left alone (so accessory
-    extensions like staffs/scepters keep their own outlines)."""
+    color: "white" → use OUTLINE = (40,40,50)
+           "black" → use BLACK_OUTLINE = (16,14,22) so the black team's
+             body outline matches its dark recolor."""
+    outline_color = OUTLINE if color == "white" else BLACK_OUTLINE
     out = composed.convert("RGBA").copy()
     op = out.load()
     sm = alpha_mask(baseline)
@@ -351,7 +385,62 @@ def restamp_body_outline(composed: Image.Image, baseline: Image.Image) -> Image.
             if not sm[x][y]:
                 continue
             if is_boundary(sm, x, y):
-                op[x, y] = OUTLINE
+                op[x, y] = outline_color
+    return out
+
+
+def normalize_outline_per_team(img: Image.Image, color: str) -> Image.Image:
+    """Final pass: pixels matching the white-team OUTLINE = (40,40,50)
+    get swapped to BLACK_OUTLINE on the black team. Accessory outlines
+    were snapped to white OUTLINE at generation time (since accessories
+    are shared between teams); on the black team we re-tint them.
+
+    Other dark colors (BLACK_FILL, BLACK_SHADOW) are LEFT ALONE — only
+    the exact white-OUTLINE color is swapped."""
+    if color == "white":
+        return img
+    out = img.convert("RGBA").copy()
+    op = out.load()
+    w, h = out.size
+    for y in range(h):
+        for x in range(w):
+            if op[x, y] == OUTLINE:
+                op[x, y] = BLACK_OUTLINE
+    return out
+
+
+def snap_body_interior_to_suite(composed: Image.Image, baseline: Image.Image,
+                                color: str, accent_palette: list,
+                                head_bot_y: int) -> Image.Image:
+    """For pixels INSIDE the baseline body silhouette and BELOW the
+    orb/head zone (y >= head_bot_y), snap any non-suite, non-accent
+    color to the nearest suite color. This catches orb/scepter edge
+    pixels that bled into the body interior during compositing.
+
+    Pixels OUTSIDE the baseline (accessory extensions like staff or
+    scepter) keep their own colors."""
+    suite_white = [OUTLINE, FILL, SHADOW, HIGHLIGHT]
+    suite_black = [BLACK_OUTLINE, BLACK_FILL, BLACK_SHADOW, BLACK_HILIGHT]
+    suite = suite_white if color == "white" else suite_black
+    allowed = set(suite) | set(accent_palette)
+    out = composed.convert("RGBA").copy()
+    op = out.load()
+    sm = alpha_mask(baseline)
+    w, h = baseline.size
+    for y in range(head_bot_y, h):
+        for x in range(w):
+            if not sm[x][y]:
+                continue
+            if is_boundary(sm, x, y):
+                continue
+            c = op[x, y]
+            if c[3] < ALPHA_THRESH:
+                continue
+            if c in allowed:
+                continue
+            # Non-suite pixel — snap to nearest suite color by RGB dist.
+            best = min(suite, key=lambda s: sum((c[i] - s[i]) ** 2 for i in range(3)))
+            op[x, y] = best
     return out
 
 
@@ -380,6 +469,14 @@ class Accessory:
     after resize so the accessory is bilaterally symmetric. Useful for
     items like the cross where PixelLab nearest-neighbor downsample
     can drop a few pixels on one side."""
+    full_sym: bool = False
+    """If True, force PERFECT bilateral symmetry: pick the denser side
+    of each row and mirror it to the other. Use for items that should
+    be exactly symmetric, like the king's orb."""
+    accent_palette: list = None
+    """Optional explicit accent palette for this accessory. When set,
+    snap_body_interior_to_suite uses this set (in addition to the
+    suite palette) to decide which interior body pixels are 'allowed'."""
 
 STYLE_SUFFIX = (
     ", isolated single object, transparent background, dark black "
@@ -509,15 +606,7 @@ PIECES_ACCESSORIES = {
             target_w=12, target_h=12,
             anchor=(32, 8), z=0,
             negative="cross, plus sign, religious symbol, multiple orbs",
-        ),
-        Accessory(
-            id="beard",
-            prompt=("a long silver-grey beard hanging downward in a "
-                    "wedge shape, fluffy texture, dark outline, "
-                    "isolated"),
-            target_w=10, target_h=15,
-            anchor=(32, 22), z=1,
-            negative="face, person, body, mustache only, white beard",
+            full_sym=True,
         ),
         Accessory(
             id="scepter",
@@ -696,17 +785,50 @@ def acceptable_accessory(img: Image.Image, target_w: int, target_h: int) -> bool
 # DRIVER
 # ---------------------------------------------------------------------------
 
+def wizard_recolor_to_black(img: Image.Image) -> Image.Image:
+    """Recolor a white-team sprite to its black-team equivalent.
+    Maps the cream suite (FILL/SHADOW/OUTLINE/HIGHLIGHT) to the dark
+    BLACK_* equivalents; preserves any other (accent) colors so the
+    wizard outfit stays themed on both teams.
+
+    Used to derive the black baseline from the white baseline so both
+    teams share an identical 4-color body palette regardless of what
+    colors the on-disk black sprite happens to have."""
+    swap = {
+        OUTLINE:   BLACK_OUTLINE,
+        FILL:      BLACK_FILL,
+        SHADOW:    BLACK_SHADOW,
+        HIGHLIGHT: BLACK_HILIGHT,
+    }
+    out = img.convert("RGBA").copy()
+    op = out.load()
+    w, h = out.size
+    for y in range(h):
+        for x in range(w):
+            c = op[x, y]
+            if c[3] < ALPHA_THRESH:
+                continue
+            if c in swap:
+                op[x, y] = swap[c]
+    return out
+
+
 def load_original_baselines() -> dict:
-    """Snapshot all 9 white + 9 black baselines into memory BEFORE any
-    piece gets overwritten. Pieces that override their baseline (like
-    bandit_pawn → pawn) need the ORIGINAL pawn, not the already-
-    wizardized version."""
+    """Snapshot all 9 baselines into memory BEFORE any piece gets
+    overwritten. The white baseline is taken from disk; the black
+    baseline is DERIVED by recoloring the white baseline via
+    wizard_recolor_to_black, so both teams share an identical color
+    contract (BLACK_OUTLINE / BLACK_FILL etc.) regardless of what
+    colors the original on-disk black sprite happened to use."""
     out = {"white": {}, "black": {}}
-    for color, src_dir in (("white", WHITE_DIR), ("black", BLACK_DIR)):
-        for piece in PIECES_ACCESSORIES.keys():
-            path = src_dir / piece / "static.png"
-            if path.exists():
-                out[color][piece] = Image.open(path).convert("RGBA")
+    for piece in PIECES_ACCESSORIES.keys():
+        wp = WHITE_DIR / piece / "static.png"
+        if not wp.exists():
+            continue
+        white_img = Image.open(wp).convert("RGBA")
+        out["white"][piece] = white_img
+        # Derive matching black baseline.
+        out["black"][piece] = wizard_recolor_to_black(white_img)
     return out
 
 
@@ -765,6 +887,7 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
                 target_w=acc.target_w,
                 target_h=acc.target_h,
                 symmetric=acc.symmetric,
+                full_sym=acc.full_sym,
             )
         # Body goes on top of behind layer.
         composed = Image.alpha_composite(canvas, textured)
@@ -776,12 +899,36 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
                 target_w=acc.target_w,
                 target_h=acc.target_h,
                 symmetric=acc.symmetric,
+                full_sym=acc.full_sym,
             )
         # Restamp the body's 1-px outline so any accessory composite
-        # that painted over the boundary gets the dark suite OUTLINE
-        # restored. Accessory silhouette extensions (staff, scepter,
-        # cape extending past body) keep their own outlines.
-        composed = restamp_body_outline(composed, baseline)
+        # that painted over the boundary gets the team's OUTLINE
+        # restored.
+        composed = restamp_body_outline(composed, baseline, color=color)
+        # Snap body-interior pixels (below the orb / head zone) that are
+        # NEITHER suite nor accent to the nearest suite color. Catches
+        # orb-edge bleeds and similar leakage. Use the body's first
+        # WIDE row (>= 14 px wide silhouette) as the head/orb cutoff.
+        head_bot = 0
+        bsm = alpha_mask(baseline)
+        for y in range(baseline.size[1]):
+            if sum(1 for x in range(baseline.size[0]) if bsm[x][y]) >= 14:
+                head_bot = y
+                break
+        # Compose accent palette from all this piece's accessories.
+        accent = []
+        for acc, _ in accessory_pngs:
+            if acc.accent_palette:
+                accent.extend(acc.accent_palette)
+        composed = snap_body_interior_to_suite(
+            composed, baseline, color=color,
+            accent_palette=accent, head_bot_y=head_bot)
+        # Final pass: every near-black pixel (e.g. accessory outlines
+        # snapped to white-team OUTLINE) gets normalized to the team's
+        # OUTLINE color. Without this the black king has white-team
+        # OUTLINE pixels in accessory outlines, producing a wrong-color
+        # boundary that fails the integrity check.
+        composed = normalize_outline_per_team(composed, color)
         composed.save(save_path)
         results[color] = save_path
 
