@@ -454,6 +454,53 @@ without the extra motion polish.
 cascade. The fade-out for `_hide_static_sprite` and the tween scale
 pulses on the body propagate to the weapon for free.
 
+### 5e. Theatrical pacing — weighted frame durations + peak burst
+
+Default `schedule_frame_swaps` distributes frames uniformly across the
+animation duration: at `total_dur ≈ 290 ms` over 6 attack frames, each
+frame gets ~48 ms — not enough for the eye to fixate on the peak
+strike (raised staff + glowing tip). Pacing reweights the timing so
+the wind-up and peak frames hold longer while the strike itself stays
+snappy.
+
+**Table** (in [GameScene.gd](../../godot/scenes/GameScene.gd)):
+`ATTACK_FRAME_DURATIONS[piece] = [ms-per-frame × 6]` per
+weapon-bearing piece. Each piece's frame 3 starts at exactly **0.200 s**
+to align with `T_IMPACT` — the damage whiteout flash fires the same
+instant the weapon hits its peak position.
+
+```
+piece          F0   F1   F2   F3*  F4   F5    total    feel
+pawn           50   80   70  130   80   50  = 460 ms   apprentice — quick
+bishop         50   80   70  140   90   60  = 490 ms   caster — measured
+queen          50   80   70  160  110   60  = 530 ms   royal — ceremonious
+king           50   80   70  180  130   70  = 580 ms   archmage — slowest
+bandit_pawn    60   80   60  130   80   50  = 460 ms   assassin — snappy
+```
+
+The position tween (`T_ANTICIPATE + T_LUNGE + T_SETTLE = 290 ms`) is
+unchanged — body settles at the target square before the weapon
+finishes its recovery. Weight + follow-through reads naturally.
+
+**Wiring** ([UiMotion.gd](../../godot/engine/UiMotion.gd)):
+`weighted_frame_swaps(tween, sprite, frames, durations, delay)` — the
+non-uniform variant of `schedule_frame_swaps`. `_schedule_piece_anim`
+picks the weighted path when `ATTACK_FRAME_DURATIONS` has the piece
+and the anim is `attack`; falls back to uniform otherwise.
+
+**Peak-frame visual punch** (in
+[_split_anim_weapons.py](_split_anim_weapons.py)):
+
+- **Burst flash** — `paint_glow_cluster` upgrades from a 9-pixel cross
+  to a **25-pixel radial burst** (cardinal rays out to distance 3 +
+  diagonal rays out to distance 2) at `intensity >= 0.7`. Frame 3 of
+  every weapon attack hits this threshold, so all 5 pieces' peak
+  frames get the burst flare.
+- **Motion streak** — for vertical-raise weapons (bishop staff, king
+  scepter) at frames where `|ex_dy| >= 5`, paint a fading glow trail
+  below the new tip showing where the orb just came from. Length
+  matches the raise distance; alpha tapers linearly toward zero.
+
 ---
 
 ## 6. Ability VFX

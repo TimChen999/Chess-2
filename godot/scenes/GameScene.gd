@@ -92,6 +92,37 @@ const T_ANTICIPATE := 0.07
 const T_LUNGE      := 0.15
 const T_SETTLE     := 0.07
 const T_IMPACT     := 0.20
+
+## Per-piece, per-anim explicit frame durations (seconds). When present,
+## _schedule_piece_anim uses these instead of uniform timing — gives
+## the wind-up + peak-strike frames more screen time so the weapon's
+## raised/glowing peak position is actually readable. See §5e of
+## THEME-WIZARDS-GUILD.md.
+##
+## Shared shape — frame 3 is the PEAK (weapon at maximum raise / thrust
+## with the brightest tip burst). All pieces' frame 3 starts at exactly
+## 0.200 s, which lines up with T_IMPACT — so the damage whiteout flash
+## fires the same instant the weapon reaches its peak position.
+##
+## Frame budget per piece (ms):
+##   piece          F0   F1   F2   F3*  F4   F5    total
+##   pawn           50   80   70  130   80   50   = 460  (apprentice — quick)
+##   bishop         50   80   70  140   90   60   = 490  (caster — measured)
+##   queen          50   80   70  160  110   60   = 530  (royal — ceremonious)
+##   king           50   80   70  180  130   70   = 580  (archmage — slowest)
+##   bandit_pawn    60   80   60  130   80   50   = 460  (assassin — snappy)
+##
+## All durations >= position-tween length (0.290 s) so the body has
+## settled at the target square by the time the weapon's recovery
+## frames play — reads as the weapon having weight that takes a beat
+## to return after the body lands.
+const ATTACK_FRAME_DURATIONS := {
+	"pawn":        [0.050, 0.080, 0.070, 0.130, 0.080, 0.050],
+	"bishop":      [0.050, 0.080, 0.070, 0.140, 0.090, 0.060],
+	"queen":       [0.050, 0.080, 0.070, 0.160, 0.110, 0.060],
+	"king":        [0.050, 0.080, 0.070, 0.180, 0.130, 0.070],
+	"bandit_pawn": [0.060, 0.080, 0.060, 0.130, 0.080, 0.050],
+}
 ## Knight / alter-knight jump arc — vertical lift in pixels over the move's
 ## linear interpolation. Layered on top of the move_jump pose animation.
 const KNIGHT_ARC_HEIGHT := 24.0
@@ -1513,12 +1544,25 @@ func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
 	var body_key := "body_%s" % anim
 	var weapon_key := "weapon_%s" % anim
 	var weapon_child: TextureRect = lbl.get_node_or_null("Weapon")
+	# Theatrical pacing: when this piece has explicit per-frame durations
+	# for this anim, use weighted timing so the peak strike frame lingers
+	# instead of flashing by in 1/N of total_dur.
+	var weighted_durs: Array = []
+	if anim == "attack" and ATTACK_FRAME_DURATIONS.has(def_id):
+		weighted_durs = ATTACK_FRAME_DURATIONS[def_id]
 	if dict.has(body_key) and dict.has(weapon_key) and weapon_child != null:
-		UiMotion.schedule_frame_swaps(tween, lbl, dict[body_key], total_dur, delay)
-		UiMotion.schedule_frame_swaps(tween, weapon_child, dict[weapon_key], total_dur, delay)
+		if not weighted_durs.is_empty():
+			UiMotion.weighted_frame_swaps(tween, lbl, dict[body_key], weighted_durs, delay)
+			UiMotion.weighted_frame_swaps(tween, weapon_child, dict[weapon_key], weighted_durs, delay)
+		else:
+			UiMotion.schedule_frame_swaps(tween, lbl, dict[body_key], total_dur, delay)
+			UiMotion.schedule_frame_swaps(tween, weapon_child, dict[weapon_key], total_dur, delay)
 		return
 	if not dict.has(anim): return
-	UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
+	if not weighted_durs.is_empty():
+		UiMotion.weighted_frame_swaps(tween, lbl, dict[anim], weighted_durs, delay)
+	else:
+		UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
 
 ## Knight / Alter Knight parabolic arc — driven by tween_method so the
 ## position computation is per-tick and overrides the linear lerp the

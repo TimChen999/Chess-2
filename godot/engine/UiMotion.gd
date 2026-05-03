@@ -74,6 +74,36 @@ static func schedule_frame_swaps(tween: Tween, sprite: TextureRect,
 		var f: Texture2D = frames[i]
 		tween.tween_callback(_swap_texture.bind(sprite, f)).set_delay(delay + i * step)
 
+## Same as schedule_frame_swaps but with explicit per-frame durations
+## (in seconds). Used to add theatrical pacing to attack animations:
+## hold the wind-up + peak frames longer for visibility while keeping
+## the strike snappy. See THEME-WIZARDS-GUILD.md §5e for the rationale.
+##
+## `durations[i]` is how long frame i is held BEFORE the next swap fires.
+## Frame 0 is set immediately at `delay`. Frame i is set at
+## `delay + sum(durations[0..i-1])`. The total animation length equals
+## `sum(durations)`.
+##
+## When durations.size() != frames.size() this falls back to uniform
+## timing using sum(durations) as total_duration so callers don't have
+## to special-case missing data.
+static func weighted_frame_swaps(tween: Tween, sprite: TextureRect,
+								  frames: Array, durations: Array,
+								  delay: float = 0.0) -> void:
+	if frames.is_empty(): return
+	if not is_instance_valid(sprite): return
+	var total: float = 0.0
+	for d in durations:
+		total += float(d)
+	if durations.size() != frames.size():
+		schedule_frame_swaps(tween, sprite, frames, total, delay)
+		return
+	var t: float = 0.0
+	for i in frames.size():
+		var f: Texture2D = frames[i]
+		tween.tween_callback(_swap_texture.bind(sprite, f)).set_delay(delay + t)
+		t += float(durations[i])
+
 static func _swap_texture(sprite: TextureRect, tex: Texture2D) -> void:
 	if is_instance_valid(sprite):
 		sprite.texture = tex

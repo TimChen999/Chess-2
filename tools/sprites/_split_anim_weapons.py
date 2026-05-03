@@ -215,22 +215,43 @@ def find_top_opaque(img: Image.Image) -> tuple[int, int] | None:
 def paint_glow_cluster(img: Image.Image, cx: int, cy: int,
                         color: tuple[int, int, int],
                         intensity: float) -> Image.Image:
-    """Paint a small additive gold/teal/etc. glow cluster at (cx, cy) on
-    the image. intensity 0 -> no-op. Cluster is a 5-pixel cross with
-    the center brightest."""
+    """Paint a glow cluster at (cx, cy). At low intensity (<0.7) it's a
+    subtle 9-pixel cross. At high intensity (>=0.7) — the attack-peak
+    "staff light flash" — it expands into a 21-pixel radial burst with
+    cardinal rays out to distance 3 + diagonal rays out to distance 2.
+    The burst reads as a magical flare at the orb / blade-tip the
+    instant the strike lands."""
     if intensity <= 0:
         return img
     out = img.convert("RGBA").copy()
     op = out.load()
     w, h = out.size
-    # Cluster pattern: center + 4 cardinal + diagonals at lower intensity.
-    spots = [
-        (0, 0,  1.0),
-        (-1, 0, 0.65), (1, 0, 0.65),
-        (0, -1, 0.65), (0, 1, 0.65),
-        (-1, -1, 0.40), (1, -1, 0.40),
-        (-1, 1, 0.40),  (1, 1, 0.40),
-    ]
+    if intensity >= 0.7:
+        # Burst flash — peak strike frame. Center + 8-neighborhood +
+        # cardinal rays at distance 2 and 3 + diagonal rays at distance 2.
+        spots = [
+            (0, 0, 1.00),
+            (-1, 0, 0.90), (1, 0, 0.90),
+            (0, -1, 0.90), (0, 1, 0.90),
+            (-1, -1, 0.70), (1, -1, 0.70),
+            (-1, 1, 0.70),  (1, 1, 0.70),
+            (-2, 0, 0.55), (2, 0, 0.55),
+            (0, -2, 0.55), (0, 2, 0.55),
+            (-2, -1, 0.35), (2, -1, 0.35),
+            (-2, 1, 0.35),  (2, 1, 0.35),
+            (-1, -2, 0.35), (1, -2, 0.35),
+            (-1, 2, 0.35),  (1, 2, 0.35),
+            (-3, 0, 0.30), (3, 0, 0.30),
+            (0, -3, 0.30), (0, 3, 0.30),
+        ]
+    else:
+        spots = [
+            (0, 0,  1.0),
+            (-1, 0, 0.65), (1, 0, 0.65),
+            (0, -1, 0.65), (0, 1, 0.65),
+            (-1, -1, 0.40), (1, -1, 0.40),
+            (-1, 1, 0.40),  (1, 1, 0.40),
+        ]
     for (ox, oy, factor) in spots:
         x = cx + ox
         y = cy + oy
@@ -240,7 +261,38 @@ def paint_glow_cluster(img: Image.Image, cx: int, cy: int,
         if a <= 0:
             continue
         existing = op[x, y]
-        # Blend toward glow color additively.
+        nr = min(255, existing[0] + (color[0] - existing[0]) * a // 255)
+        ng = min(255, existing[1] + (color[1] - existing[1]) * a // 255)
+        nb = min(255, existing[2] + (color[2] - existing[2]) * a // 255)
+        na = max(existing[3], a)
+        op[x, y] = (nr, ng, nb, na)
+    return out
+
+
+def paint_motion_streak(img: Image.Image, x: int, y_start: int, y_end: int,
+                         color: tuple[int, int, int],
+                         max_alpha: int = 110) -> Image.Image:
+    """Paint a vertical fading streak at column x from y_start (brighter,
+    near tip) toward y_end (dimmer, where the tip used to be). Reads as
+    motion blur behind a fast-moving glowing object. Each pixel blends
+    additively toward `color` with alpha tapered by distance from the
+    starting end."""
+    if y_start == y_end:
+        return img
+    out = img.convert("RGBA").copy()
+    op = out.load()
+    w, h = out.size
+    step = 1 if y_end > y_start else -1
+    span = abs(y_end - y_start)
+    for k in range(1, span + 1):
+        y = y_start + k * step
+        if not (0 <= x < w and 0 <= y < h):
+            continue
+        # Linear taper from max_alpha (near start) to 0 (at y_end).
+        a = int(max_alpha * (1.0 - k / float(span + 1)))
+        if a <= 0:
+            continue
+        existing = op[x, y]
         nr = min(255, existing[0] + (color[0] - existing[0]) * a // 255)
         ng = min(255, existing[1] + (color[1] - existing[1]) * a // 255)
         nb = min(255, existing[2] + (color[2] - existing[2]) * a // 255)
@@ -348,12 +400,29 @@ def split_anim(piece: str, color: str, anim: str) -> dict:
 
         body_frames.append(body_frame)
 
-        # Weapon frame: lockstep + extras + anim modifiers.
+        # Weapon frame: lockstep + extras + anim modifiers + glow burst
+        # at peak + motion streak for vertical-raise weapons.
         weapon_frame = lock
         if extras is not None and i < len(extras):
             ex_dx, ex_dy, glow_int = extras[i]
             if ex_dx or ex_dy:
                 weapon_frame = translate(weapon_frame, ex_dx, ex_dy)
+            # Motion streak — for staves/scepters that raise vertically
+            # (bishop, king), draw a fading glow trail BELOW the new
+            # tip showing where the orb just came from. Only apply when
+            # the raise is significant (|ex_dy| >= 5).
+            if (piece in ("bishop", "king") and ex_dy is not None
+                    and ex_dy <= -5 and glow_int > 0):
+                new_tip = find_top_opaque(weapon_frame)
+                if new_tip is not None:
+                    streak_len = abs(ex_dy)
+                    weapon_frame = paint_motion_streak(
+                        weapon_frame, new_tip[0],
+                        y_start=new_tip[1] + 1,
+                        y_end=new_tip[1] + streak_len,
+                        color=glow_color,
+                        max_alpha=int(95 * glow_int),
+                    )
             if glow_int > 0:
                 tip = find_top_opaque(weapon_frame)
                 if tip is not None:
