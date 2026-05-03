@@ -262,8 +262,11 @@ def pre_clear_bishop_cross(img: Image.Image) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 def snap_outline(img: Image.Image) -> Image.Image:
-    """Snap near-black pixels (max channel < 80) to exact suite OUTLINE
-    so accessory outlines match the piece outlines."""
+    """Snap near-black pixels to exact suite OUTLINE so accessory
+    outlines match the piece outlines. We use brightness rather than
+    max-channel so dark-tinted pixels (e.g. dark navy blue ~45,67,99
+    that PixelLab paints around a blue saddle) also snap. Threshold:
+    average brightness < 100."""
     out = img.convert("RGBA").copy()
     op = out.load()
     w, h = out.size
@@ -272,7 +275,7 @@ def snap_outline(img: Image.Image) -> Image.Image:
             r, g, b, a = op[x, y]
             if a < ALPHA_THRESH:
                 continue
-            if max(r, g, b) < 80:
+            if (r + g + b) / 3.0 < 95:
                 op[x, y] = OUTLINE
     return out
 
@@ -329,6 +332,27 @@ def composite_accessory(piece_img: Image.Image, accessory_img: Image.Image,
     layer = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
     layer.paste(cropped, (paste_x, paste_y), cropped)
     return Image.alpha_composite(piece_img.convert("RGBA"), layer)
+
+
+def restamp_body_outline(composed: Image.Image, baseline: Image.Image) -> Image.Image:
+    """Walk the BASELINE silhouette boundary and force every boundary
+    pixel to be exactly OUTLINE color in the composed result. This
+    restores the body's 1-pixel dark outline if any accessory composite
+    painted over it.
+
+    Pixels OUTSIDE the baseline silhouette are left alone (so accessory
+    extensions like staffs/scepters keep their own outlines)."""
+    out = composed.convert("RGBA").copy()
+    op = out.load()
+    sm = alpha_mask(baseline)
+    w, h = baseline.size
+    for y in range(h):
+        for x in range(w):
+            if not sm[x][y]:
+                continue
+            if is_boundary(sm, x, y):
+                op[x, y] = OUTLINE
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -536,14 +560,6 @@ PIECES_ACCESSORIES = {
             target_w=22, target_h=11,
             anchor=(28, 38), z=0,
             negative="horse, person, rider, full armor, blanket on face",
-        ),
-        Accessory(
-            id="horn_glow",
-            prompt=("a tiny bright pink-magenta sparkle of magical glow, "
-                    "dark outline, isolated tiny shape"),
-            target_w=3, target_h=3,
-            anchor=(37, 9), z=1,    # right peak = horn tip (left peak = ear)
-            negative="full glow, large shape, multiple sparkles",
         ),
     ],
     "assassin_bishop": [
@@ -760,6 +776,11 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
                 target_h=acc.target_h,
                 symmetric=acc.symmetric,
             )
+        # Restamp the body's 1-px outline so any accessory composite
+        # that painted over the boundary gets the dark suite OUTLINE
+        # restored. Accessory silhouette extensions (staff, scepter,
+        # cape extending past body) keep their own outlines.
+        composed = restamp_body_outline(composed, baseline)
         composed.save(save_path)
         results[color] = save_path
 
