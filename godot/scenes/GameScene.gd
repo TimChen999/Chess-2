@@ -670,6 +670,22 @@ func _make_square(sq: int) -> Button:
 	sprite.name = "Sprite"
 	btn.add_child(sprite)
 
+	# Weapon overlay (child of Sprite so its position/scale/modulate
+	# inherits from the body — see §5d of THEME-WIZARDS-GUILD.md).
+	# Only visible for weapon-bearing pieces (bishop staff, queen/king
+	# scepters, pawn spellbook, bandit_pawn sword); other pieces leave
+	# this empty. Filled by `_apply_piece_textures()` when the square
+	# is updated.
+	var weapon := TextureRect.new()
+	weapon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	weapon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	weapon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	weapon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	weapon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	weapon.name = "Weapon"
+	weapon.visible = false
+	sprite.add_child(weapon)
+
 	# HP badge (top-left). Compact "x/y" with a dark plate behind it for
 	# readability against the cream/dark wood tile colors.
 	var hp_plate := ColorRect.new()
@@ -790,6 +806,10 @@ func _render() -> void:
 		bg.modulate = Color.WHITE
 		hl.color = Color(0, 0, 0, 0)
 		sprite.texture = null
+		var weapon_child: TextureRect = sprite.get_node_or_null("Weapon")
+		if weapon_child != null:
+			weapon_child.texture = null
+			weapon_child.visible = false
 		shadow.visible = false
 		hp_plate.visible = false
 		hp_lbl.text = ""
@@ -847,7 +867,7 @@ func _render() -> void:
 		var p = state.board[sq]
 		if p != null:
 			var def: PieceDef = state.config.pieces[p.def_id]
-			sprite.texture = SpriteFactory.piece_texture(p.def_id, p.color)
+			_apply_piece_textures(sprite, p.def_id, p.color)
 			sprite.scale = Vector2.ONE
 			sprite.pivot_offset = sprite.size * 0.5
 			shadow.visible = true
@@ -1416,7 +1436,6 @@ func _sq_to_pos(sq: int) -> Vector2:
 
 func _create_floating_piece(piece: Piece, sq: int) -> TextureRect:
 	var tr := TextureRect.new()
-	tr.texture = SpriteFactory.piece_texture(piece.def_id, piece.color)
 	tr.size = Vector2(SQ_SIZE - 8, SQ_SIZE - 8)
 	tr.position = _sq_to_pos(sq) + Vector2(4, 4)
 	tr.pivot_offset = Vector2(tr.size.x * 0.5, tr.size.y * 0.5)
@@ -1424,8 +1443,40 @@ func _create_floating_piece(piece: Piece, sq: int) -> TextureRect:
 	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	tr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
 	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Weapon overlay child — same FULL_RECT preset as the board square's
+	# weapon overlay; visibility/textures are set by _apply_piece_textures.
+	var weapon := TextureRect.new()
+	weapon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	weapon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	weapon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	weapon.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	weapon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	weapon.name = "Weapon"
+	weapon.visible = false
+	tr.add_child(weapon)
+	_apply_piece_textures(tr, piece.def_id, piece.color)
 	anim_overlay.add_child(tr)
 	return tr
+
+## Set body + weapon textures on a sprite TextureRect that has a "Weapon"
+## child. For weapon-bearing pieces (those that have body_static.png and
+## weapon_static.png on disk), the body texture goes on the Sprite layer
+## and the weapon texture on the Weapon overlay. For pieces with no
+## weapon split, falls back to the single-texture piece_texture() and
+## hides the Weapon child.
+func _apply_piece_textures(sprite: TextureRect, def_id: String, color: int) -> void:
+	var weapon: TextureRect = sprite.get_node_or_null("Weapon")
+	var body_tex := SpriteFactory.body_texture(def_id, color)
+	var weapon_tex := SpriteFactory.weapon_texture(def_id, color)
+	if body_tex != null and weapon_tex != null and weapon != null:
+		sprite.texture = body_tex
+		weapon.texture = weapon_tex
+		weapon.visible = true
+	else:
+		sprite.texture = SpriteFactory.piece_texture(def_id, color)
+		if weapon != null:
+			weapon.texture = null
+			weapon.visible = false
 
 ## Sprite-based FX sized to a single square. Used by ability resolves
 ## (cannon / debris / lightning). The first frame is set on creation so
@@ -1449,10 +1500,23 @@ func _create_fx_sprite(sq: int, frames: Array, tint: Color = Color.WHITE) -> Tex
 ## No-op if the piece's frames dict doesn't have the requested anim — keeps
 ## variant-specific anims (jump, lunge) from blowing up when they're missing
 ## on a stock piece.
+##
+## When the piece has a two-layer weapon split (body_<anim> +
+## weapon_<anim> strips on disk) AND `lbl` has a "Weapon" child, frame
+## swaps are scheduled on the body layer (lbl.texture) AND the weapon
+## overlay (Weapon.texture) in lockstep. Otherwise falls back to the
+## single-texture path against the full-composite <anim> strip.
 func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
 						  color: int, anim: String, total_dur: float,
 						  delay: float) -> void:
 	var dict: Dictionary = SpriteFactory.piece_frames(def_id, color)
+	var body_key := "body_%s" % anim
+	var weapon_key := "weapon_%s" % anim
+	var weapon_child: TextureRect = lbl.get_node_or_null("Weapon")
+	if dict.has(body_key) and dict.has(weapon_key) and weapon_child != null:
+		UiMotion.schedule_frame_swaps(tween, lbl, dict[body_key], total_dur, delay)
+		UiMotion.schedule_frame_swaps(tween, weapon_child, dict[weapon_key], total_dur, delay)
+		return
 	if not dict.has(anim): return
 	UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
 

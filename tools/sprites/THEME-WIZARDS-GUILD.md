@@ -9,11 +9,19 @@ in a clean flat-cream + outline + right-edge-shadow palette (suite
 palette defined in [restyle.py](restyle.py)). They are the **baseline
 canvas** — accessories are generated separately and composited on top.
 
-> **Approach evolution recorded here**: this doc was rewritten after
-> implementation. The earlier inpaint-only and regenerate-from-scratch
-> approaches were both abandoned. The shipped pipeline is **layered
-> compositing of isolated accessory PNGs** — see §3 for details and
-> §9 for a list of approaches that didn't work.
+> **Approach evolution recorded here**: this doc has been rewritten
+> several times during implementation. The earlier inpaint-only and
+> regenerate-from-scratch approaches were both abandoned. The shipped
+> pipeline is **layered compositing of isolated accessory PNGs** — see
+> §3 for details and §9 for a list of approaches that didn't work.
+>
+> **NEW — two-sprite layered animation** (§5d): for pieces with a
+> distinguishable weapon (bishop staff, bandit_pawn sword, queen/king
+> scepter, assassin_bishop sword), the weapon is rendered as a *separate
+> overlay sprite* on top of a body-only sprite, so the weapon can swing
+> / raise / glow independently of the body during attacks. Statics still
+> ship the full composite for UI icons; animated rendering uses the
+> body-only + weapon-only pair. Bishop is the prototype implementation.
 
 ---
 
@@ -29,7 +37,8 @@ user's call — the SDK is what the scripts use.
 | Script | Purpose |
 |---|---|
 | [wizard_statics.py](wizard_statics.py) | the static-sprite pipeline — generates per-piece accessory PNGs via PixelLab pixflux, composites them onto the cream baseline. **The canonical static generator.** |
-| [wizard_animations.py](wizard_animations.py) | procedural animation generator — applies per-frame translate / lean / squash transforms to the wizard static. **The canonical animator.** |
+| [wizard_animations.py](wizard_animations.py) | procedural animation generator — applies per-frame translate / lean / squash transforms to the wizard static. **The canonical body animator.** Loads `static.png` (full composite) and produces composite anim strips. When a piece has a body-only static (`body_static.png`), it ALSO produces body-only strips (`body_<anim>.png`) for the layered-rendering path. |
+| [wizard_weapon_animations.py](wizard_weapon_animations.py) | weapon-overlay animation generator — for pieces declared as weapon-bearing, loads `weapon_static.png`, applies the SAME per-frame body POSES (so the weapon stays anchored to the body), then layers per-piece, per-anim *extra* motion (e.g. bishop staff raise + tip glow during attack). Outputs `weapon_<anim>.png`. |
 | [wizard_animations_pixellab.py](wizard_animations_pixellab.py) | PixelLab `animate_with_text` attempt. Kept for reference only — see §9 for why we don't ship it. |
 | [wizard_vfx.py](wizard_vfx.py) | VFX generator — generates atomic VFX images via PixelLab pixflux, composites them at progressive Y positions to produce visible falling motion. |
 | [restyle.py](restyle.py) | silhouette-preserving repaint into the suite palette — used historically; not needed in the layered pipeline. |
@@ -244,7 +253,28 @@ class Accessory:
     symmetric: bool = False # mirror-fill holes only
     full_sym: bool = False  # force perfect bilateral symmetry (orb)
     accent_palette: list = None  # extra allowed colors in body interior
+    weapon: bool = False    # NEW: if True, this accessory becomes a SEPARATE
+                            # `weapon_static.png` and is composited onto a
+                            # transparent canvas instead of onto the body.
+                            # The body-only static (sans this accessory) is
+                            # saved as `body_static.png`. The fully-composited
+                            # `static.png` still ships for UI consumers
+                            # (captured-piece icons, promotion icons).
 ```
+
+### 3.3 Three static outputs per weapon-bearing piece
+
+For pieces that declare any `weapon=True` accessory, `wizard_statics.py`
+emits **three** PNGs into `pieces/<color>/<piece>/`:
+
+| file | contents | consumer |
+|---|---|---|
+| `static.png` | body + ALL accessories (incl. weapon) | UI icons (captured pieces, promotion picker, customization preview) |
+| `body_static.png` | body + non-weapon accessories | board + floating-piece animation `Sprite` layer |
+| `weapon_static.png` | weapon-only on transparent canvas | board + floating-piece animation `Weapon` overlay layer |
+
+For pieces with no `weapon=True` accessory, only `static.png` ships and
+the layered code path falls back to single-sprite rendering at runtime.
 
 ---
 
@@ -362,19 +392,67 @@ the top leans 13 px right, like a paddle pivoting at its base.
 The `_verify_assets.py` script catches all the dimension / frame-count
 checks across all 99 sprites in one pass.
 
-### 5d. Per-piece weapon-only animation (NOT shipped)
+### 5d. Two-sprite layered animation (weapon-bearing pieces)
 
-The current animations apply the same translate+lean transform to the
-WHOLE sprite (body + accessories baked in as one rigid image). The
-weapon visibly swings only because it sits at the top of the piece —
-where the lean shear amplifies most. Pieces with weapons at mid-body
-(pawn book, bandit dagger) barely register as swinging.
+For pieces with a `weapon=True` accessory (currently bishop only —
+prototype), the weapon is rendered as a **separate overlay sprite** on
+top of a body-only sprite. The two sprites move in lockstep for the
+shared body pose (so the staff stays anchored to the bishop's hand
+during a lean), then the weapon adds its own per-anim motion on top
+(raise + tip glow during attack).
 
-To get true per-weapon animation (e.g. bishop staff thrusting
-independently of the body), each accessory would need to stay layered
-post-static-generation — a per-piece weapon mask stored alongside the
-static, then transformed independently per attack frame. Not done.
-File a follow-up if you want this.
+**Generation flow** (in [wizard_weapon_animations.py](wizard_weapon_animations.py)):
+
+1. Load `pieces/<color>/<piece>/weapon_static.png` (just the staff on
+   transparent canvas).
+2. For each anim in `[move, attack, hit, death, ...]`:
+   - For each frame, take the body's `(dx, dy, squash, lean_top)` from
+     the same `POSES` table that drives `wizard_animations.py` — call
+     `transformed()` on the weapon-only static. This guarantees lockstep:
+     when the body leans 13 px right at attack peak, so does the staff.
+   - Then add per-piece, per-anim **extra motion** from
+     `WEAPON_EXTRAS[piece][anim]` — a list of `(extra_dx, extra_dy,
+     glow_intensity)` per frame. For bishop attack: frames 2-3 get
+     `extra_dy = -8` (raise) and `glow_intensity = 0.6, 0.9` (tip glow).
+   - Glow is a small 3-5 px gold/yellow cluster painted at the staff's
+     current top opaque pixel position post-transform.
+3. Save as `pieces/<color>/<piece>/weapon_<anim>.png`.
+
+**Per-piece extras table** (sketch):
+
+```python
+WEAPON_EXTRAS = {
+    "bishop": {
+        "move":   [(0, 0, 0.0)] * 6,                   # lockstep only
+        "attack": [(0,  0, 0.0), (0,  0, 0.0),
+                   (0, -8, 0.6), (0, -12, 0.9),
+                   (0, -4, 0.3), (0,  0, 0.0)],        # raise + glow
+        "hit":    [(0, 0, 0.0)] * 3,                   # lockstep only
+        "death":  [(0, 0, 0.0)] * 5,                   # lockstep only
+    },
+    # bandit_pawn / king / queen / assassin_bishop to follow.
+}
+```
+
+**Pieces with a weapon but no extras yet**: weapon strips are still
+generated in lockstep with the body, so they stay anchored — just
+without the extra motion polish.
+
+**Godot-side rendering** ([SpriteFactory.gd](../../godot/engine/SpriteFactory.gd)):
+
+- `piece_frames(id, color)` populates `weapon_<anim>` keys when the
+  files exist on disk; missing → key absent, caller falls back.
+- The board square node ([scenes/GameScene.gd](../../godot/scenes/GameScene.gd))
+  has a `Weapon` TextureRect as a child of `Sprite`. When piece is
+  set, body texture goes on `Sprite`, weapon texture goes on `Weapon`
+  (or `Weapon` is hidden if the piece has none).
+- `_schedule_piece_anim(tween, lbl, ...)` schedules frame swaps on
+  `lbl` (body) AND on `lbl.get_node("Weapon")` (weapon overlay) when
+  the weapon strip is loaded for this anim.
+
+**Why a child of Sprite, not a sibling**: position / scale / modulate
+cascade. The fade-out for `_hide_static_sprite` and the tween scale
+pulses on the body propagate to the weapon for free.
 
 ---
 
@@ -445,15 +523,22 @@ Atoms: `magic_rocks` (cluster of grey chunks with purple aura),
 ## 7. Order of operations
 
 1. **Static sprites** — `python tools/sprites/wizard_statics.py`
-   generates all 9 pieces × 2 colors. Verify against §4. Commit.
-2. **Animations** — `python tools/sprites/wizard_animations.py`
-   generates move/attack/hit/death + knight/alter_knight extras.
+   generates all 9 pieces × 2 colors. For weapon-bearing pieces, also
+   emits `body_static.png` + `weapon_static.png`. Verify against §4.
+   Commit.
+2. **Body animations** — `python tools/sprites/wizard_animations.py`
+   generates `<anim>.png` (full composite) for every piece. For
+   weapon-bearing pieces, also generates `body_<anim>.png` (body-only).
    Verify against §5c. Commit.
-3. **VFX** — `python tools/sprites/wizard_vfx.py` generates the three
+3. **Weapon animations** — `python tools/sprites/wizard_weapon_animations.py`
+   generates `weapon_<anim>.png` for every piece declared as
+   weapon-bearing. Lockstep body POSES + per-piece, per-anim extras.
+   Verify against §5d. Commit.
+4. **VFX** — `python tools/sprites/wizard_vfx.py` generates the three
    FX strips. Verify against §6d. Commit.
-4. **Godot import check** — run `Godot --headless --path godot --quit-after 50 --import`
+5. **Godot import check** — run `Godot --headless --path godot --quit-after 50 --import`
    to verify all assets import cleanly with 0 errors.
-5. Each phase as a separate commit so reverting individual phases is
+6. Each phase as a separate commit so reverting individual phases is
    cheap if something looks wrong in-game.
 
 ---
@@ -464,11 +549,16 @@ PixelLab API calls (each ~$0.005–0.02):
 
 - **Statics**: 9 pieces × ~2 accessories each = ~18 calls, cached by
   `(piece, accessory_id, seed)` so re-runs hit cache.
-- **Animations**: **0 calls** (procedural).
+- **Body animations**: **0 calls** (procedural).
+- **Weapon animations**: **0 calls** (procedural — same pose transform
+  + per-piece extra motion table; no PixelLab).
 - **VFX**: 3 abilities × ~3 atoms each = ~9 calls.
 
 **Total: ~27 calls, $0.15–$0.55 USD.** Re-rolls cost a few extra
-calls each. Cache makes iterative tuning essentially free.
+calls each. Cache makes iterative tuning essentially free. The
+weapon-overlay layer adds zero PixelLab cost — accessory PNGs are
+already on disk from the static pipeline, so the weapon static is just
+a re-composite onto a transparent canvas.
 
 ---
 

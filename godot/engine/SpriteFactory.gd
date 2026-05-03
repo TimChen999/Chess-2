@@ -36,6 +36,31 @@ static func piece_texture(piece_id: String, color: int) -> Texture2D:
 	_cache[key] = tex
 	return tex
 
+## Body-only static (no weapon overlay) — used as the base layer for
+## animated rendering of weapon-bearing pieces. Returns null when the
+## piece doesn't have a separate body/weapon split (callers fall back
+## to piece_texture() in that case).
+static func body_texture(piece_id: String, color: int) -> Texture2D:
+	var key := "body:%s:%d" % [piece_id, color]
+	if _cache.has(key): return _cache[key]
+	var path := "%s/anim/pieces/%s/%s/body_static.png" % [ASSET_ROOT, _color_dir(color), piece_id]
+	var arr := _load_strip(path)
+	var tex: Texture2D = arr[0] if arr.size() > 0 else null
+	_cache[key] = tex
+	return tex
+
+## Weapon-only static (transparent canvas with just the weapon). Used
+## as the overlay layer on top of body_texture() for animated rendering.
+## Returns null for pieces with no separate weapon overlay.
+static func weapon_texture(piece_id: String, color: int) -> Texture2D:
+	var key := "weapon:%s:%d" % [piece_id, color]
+	if _cache.has(key): return _cache[key]
+	var path := "%s/anim/pieces/%s/%s/weapon_static.png" % [ASSET_ROOT, _color_dir(color), piece_id]
+	var arr := _load_strip(path)
+	var tex: Texture2D = arr[0] if arr.size() > 0 else null
+	_cache[key] = tex
+	return tex
+
 ## Alias kept for the customization preview / ability target previews. Size
 ## is set by the receiving TextureRect; the cached static texture is reused.
 static func piece_texture_size(piece_id: String, color: int, _native: int) -> Texture2D:
@@ -46,6 +71,13 @@ static func piece_texture_size(piece_id: String, color: int, _native: int) -> Te
 ##   "move", "attack", "hit", "death" — Array[Texture2D]
 ##   "move_jump"     — Array[Texture2D] (knight + alter_knight only)
 ##   "attack_lunge"  — Array[Texture2D] (alter_knight only)
+##
+## Two-layer keys (only present for weapon-bearing pieces — see
+## §5d of THEME-WIZARDS-GUILD.md):
+##   "body_<anim>"   — Array[Texture2D] body-only frames for each <anim>
+##                     above; rendered on the Sprite layer
+##   "weapon_<anim>" — Array[Texture2D] weapon-only frames; rendered on
+##                     the Weapon overlay layer (child of Sprite)
 ##
 ## Animations whose strip file is missing are simply absent from the dict —
 ## callers should `dict.has(anim)` before reading.
@@ -59,6 +91,12 @@ static func piece_frames(piece_id: String, color: int) -> Dictionary:
 		var arr := _load_strip("%s/%s.png" % [dir, anim])
 		if not arr.is_empty():
 			out[anim] = arr
+		var body_arr := _load_strip("%s/body_%s.png" % [dir, anim])
+		if not body_arr.is_empty():
+			out["body_%s" % anim] = body_arr
+		var weapon_arr := _load_strip("%s/weapon_%s.png" % [dir, anim])
+		if not weapon_arr.is_empty():
+			out["weapon_%s" % anim] = weapon_arr
 	_cache[key] = out
 	return out
 

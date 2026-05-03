@@ -477,6 +477,14 @@ class Accessory:
     """Optional explicit accent palette for this accessory. When set,
     snap_body_interior_to_suite uses this set (in addition to the
     suite palette) to decide which interior body pixels are 'allowed'."""
+    weapon: bool = False
+    """If True, this accessory is rendered as a SEPARATE overlay sprite
+    so it can animate independently of the body (sword swing, staff
+    raise, etc.). The piece emits three statics: `static.png` (full
+    composite, for UI consumers), `body_static.png` (body + non-weapon
+    accessories, for the animated body sprite), and `weapon_static.png`
+    (this accessory only, on transparent canvas — for the weapon
+    overlay). See §5d of THEME-WIZARDS-GUILD.md."""
 
 STYLE_SUFFIX = (
     ", isolated single object, transparent background, dark black "
@@ -522,6 +530,7 @@ PIECES_ACCESSORIES = {
             target_w=12, target_h=8,
             anchor=(32, 40), z=1,
             negative="chess piece, hand, person, multiple books",
+            weapon=True,
         ),
     ],
     "knight": [
@@ -557,6 +566,7 @@ PIECES_ACCESSORIES = {
             target_w=6, target_h=50,
             anchor=(46, 32), z=1,
             negative="chess piece, person, hand, multiple staffs, weapon",
+            weapon=True,
         ),
         Accessory(
             id="stole",
@@ -587,6 +597,7 @@ PIECES_ACCESSORIES = {
             target_w=6, target_h=40,
             anchor=(46, 34), z=0,
             negative="hand, person, crown, weapon, multiple scepters",
+            weapon=True,
         ),
         Accessory(
             id="sash",
@@ -615,6 +626,7 @@ PIECES_ACCESSORIES = {
             target_w=6, target_h=40,
             anchor=(46, 36), z=2,
             negative="hand, person, crown, weapon, cross",
+            weapon=True,
         ),
     ],
     "bandit_pawn": [
@@ -639,6 +651,7 @@ PIECES_ACCESSORIES = {
             target_w=6, target_h=22,
             anchor=(32, 36), z=1,
             negative="hand, person, multiple weapons, dagger, axe",
+            weapon=True,
         ),
     ],
     "alter_knight": [
@@ -856,6 +869,74 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
     # Compose for white + black baselines
     results = {}
     baseline_piece = PIECE_BASELINE_OVERRIDE.get(piece, piece)
+    has_weapon = any(a.weapon for (a, _) in accessory_pngs)
+
+    def _compose_with(subset, baseline, color):
+        """Run the full body+accessory composite pipeline using only
+        the given subset of accessories. Mirrors the original logic so
+        the FULL-composite output (subset = all) is byte-identical to
+        the previous shipped pipeline. The body-only output (subset =
+        non-weapon) shares every step except the weapon accessory is
+        skipped during compositing — meaning every non-weapon pixel is
+        identical to the FULL composite by construction."""
+        textured = body_texture_pass(baseline, color=color)
+        behind = [(a, i) for (a, i) in subset if a.z < 0]
+        front = [(a, i) for (a, i) in subset if a.z >= 0]
+        canvas = Image.new("RGBA", textured.size, (0, 0, 0, 0))
+        for acc, acc_img in behind:
+            canvas = composite_accessory(
+                canvas, acc_img,
+                anchor_xy=acc.anchor,
+                target_w=acc.target_w,
+                target_h=acc.target_h,
+                symmetric=acc.symmetric,
+                full_sym=acc.full_sym,
+            )
+        composed = Image.alpha_composite(canvas, textured)
+        for acc, acc_img in front:
+            composed = composite_accessory(
+                composed, acc_img,
+                anchor_xy=acc.anchor,
+                target_w=acc.target_w,
+                target_h=acc.target_h,
+                symmetric=acc.symmetric,
+                full_sym=acc.full_sym,
+            )
+        composed = restamp_body_outline(composed, baseline, color=color)
+        head_bot = 0
+        bsm = alpha_mask(baseline)
+        for y in range(baseline.size[1]):
+            if sum(1 for x in range(baseline.size[0]) if bsm[x][y]) >= 14:
+                head_bot = y
+                break
+        accent = []
+        for acc, _ in subset:
+            if acc.accent_palette:
+                accent.extend(acc.accent_palette)
+        composed = snap_body_interior_to_suite(
+            composed, baseline, color=color,
+            accent_palette=accent, head_bot_y=head_bot)
+        composed = normalize_outline_per_team(composed, color)
+        return composed
+
+    def _compose_weapon_only(weapon_subset, color):
+        """Composite weapon-only accessories onto a transparent 64×64
+        canvas (no body, no body-outline restamp, no body-interior
+        snap). The per-team outline normalization is still applied so
+        the black-team weapon overlay matches BLACK_OUTLINE."""
+        canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        for acc, acc_img in sorted(weapon_subset, key=lambda x: x[0].z):
+            canvas = composite_accessory(
+                canvas, acc_img,
+                anchor_xy=acc.anchor,
+                target_w=acc.target_w,
+                target_h=acc.target_h,
+                symmetric=acc.symmetric,
+                full_sym=acc.full_sym,
+            )
+        canvas = normalize_outline_per_team(canvas, color)
+        return canvas
+
     for color, src_dir in (("white", WHITE_DIR), ("black", BLACK_DIR)):
         # Always save under THIS piece's path, but the baseline may
         # come from a different piece (e.g. bandit_pawn uses pawn).
@@ -872,69 +953,31 @@ def process_piece(client, piece: str, force: bool, baselines: dict) -> dict:
             baseline = pre_clear_king_cross(baseline)
         elif clear_kind == "bishop_cross":
             baseline = pre_clear_bishop_cross(baseline)
-        textured = body_texture_pass(baseline, color=color)
 
-        # Three-layer compositing: behind (z<0) → body → front (z≥0).
-        behind = [(a, i) for (a, i) in accessory_pngs if a.z < 0]
-        front = [(a, i) for (a, i) in accessory_pngs if a.z >= 0]
-
-        # Start with empty canvas; lay down each behind-accessory.
-        canvas = Image.new("RGBA", textured.size, (0, 0, 0, 0))
-        for acc, acc_img in behind:
-            canvas = composite_accessory(
-                canvas, acc_img,
-                anchor_xy=acc.anchor,
-                target_w=acc.target_w,
-                target_h=acc.target_h,
-                symmetric=acc.symmetric,
-                full_sym=acc.full_sym,
-            )
-        # Body goes on top of behind layer.
-        composed = Image.alpha_composite(canvas, textured)
-        # Front accessories on top.
-        for acc, acc_img in front:
-            composed = composite_accessory(
-                composed, acc_img,
-                anchor_xy=acc.anchor,
-                target_w=acc.target_w,
-                target_h=acc.target_h,
-                symmetric=acc.symmetric,
-                full_sym=acc.full_sym,
-            )
-        # Restamp the body's 1-px outline so any accessory composite
-        # that painted over the boundary gets the team's OUTLINE
-        # restored.
-        composed = restamp_body_outline(composed, baseline, color=color)
-        # Snap body-interior pixels (below the orb / head zone) that are
-        # NEITHER suite nor accent to the nearest suite color. Catches
-        # orb-edge bleeds and similar leakage. Use the body's first
-        # WIDE row (>= 14 px wide silhouette) as the head/orb cutoff.
-        head_bot = 0
-        bsm = alpha_mask(baseline)
-        for y in range(baseline.size[1]):
-            if sum(1 for x in range(baseline.size[0]) if bsm[x][y]) >= 14:
-                head_bot = y
-                break
-        # Compose accent palette from all this piece's accessories.
-        accent = []
-        for acc, _ in accessory_pngs:
-            if acc.accent_palette:
-                accent.extend(acc.accent_palette)
-        composed = snap_body_interior_to_suite(
-            composed, baseline, color=color,
-            accent_palette=accent, head_bot_y=head_bot)
-        # Final pass: every near-black pixel (e.g. accessory outlines
-        # snapped to white-team OUTLINE) gets normalized to the team's
-        # OUTLINE color. Without this the black king has white-team
-        # OUTLINE pixels in accessory outlines, producing a wrong-color
-        # boundary that fails the integrity check.
-        composed = normalize_outline_per_team(composed, color)
-        composed.save(save_path)
+        # FULL composite (body + every accessory). Always shipped at
+        # static.png — UI consumers (captured icons, promotion picker)
+        # use this single texture.
+        full = _compose_with(accessory_pngs, baseline, color)
+        full.save(save_path)
         results[color] = save_path
 
-    print(f"[{piece}] saved white + black")
+        # Two-layer outputs for animation rendering. Only emitted when
+        # this piece has at least one weapon=True accessory.
+        if has_weapon:
+            non_weapon = [(a, i) for (a, i) in accessory_pngs if not a.weapon]
+            weapon_only = [(a, i) for (a, i) in accessory_pngs if a.weapon]
+            body = _compose_with(non_weapon, baseline, color)
+            body.save(src_dir / piece / "body_static.png")
+            weapon = _compose_weapon_only(weapon_only, color)
+            weapon.save(src_dir / piece / "weapon_static.png")
+            results[f"{color}_body"] = src_dir / piece / "body_static.png"
+            results[f"{color}_weapon"] = src_dir / piece / "weapon_static.png"
+
+    extras = " + body/weapon layers" if has_weapon else ""
+    print(f"[{piece}] saved white + black{extras}")
     return {"piece": piece, "status": "ok", "paths": results,
-            "accessory_count": len(accessory_pngs)}
+            "accessory_count": len(accessory_pngs),
+            "has_weapon": has_weapon}
 
 
 def main():
