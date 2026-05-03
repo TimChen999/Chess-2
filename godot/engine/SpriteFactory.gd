@@ -97,6 +97,13 @@ static func piece_frames(piece_id: String, color: int) -> Dictionary:
 		var weapon_arr := _load_strip("%s/weapon_%s.png" % [dir, anim])
 		if not weapon_arr.is_empty():
 			out["weapon_%s" % anim] = weapon_arr
+		# Flash overlay strip — separate sprite asset for the cast-magic
+		# light burst on the staff tip during attacks. Bigger frame size
+		# (96x96) than weapon (64x64) so the burst rays don't clip; see
+		# _render_staff_flash.py for the generator.
+		var flash_arr := _load_strip("%s/weapon_flash_%s.png" % [dir, anim])
+		if not flash_arr.is_empty():
+			out["weapon_flash_%s" % anim] = flash_arr
 	_cache[key] = out
 	return out
 

@@ -86,8 +86,14 @@ const ANIM_MOVE_DURATION   := 0.26
 const ANIM_DAMAGE_DURATION := 0.16
 const ANIM_KILL_DURATION   := 0.24
 const ANIM_HIT_DURATION    := 0.4
-## Attack timing — anticipation pull-back, lunge to overshoot, settle into
-## target square. Damage/push/kill effects are delayed to land at T_IMPACT.
+## Attack timing — sequenced two-phase attack:
+##   Phase 1 (TRAVEL):  piece slides/jumps from src to dest playing the
+##                      "move" anim (ANIM_MOVE_DURATION = 0.26s).
+##   Phase 2 (STRIKE):  in place at dest, piece performs anticipate / lunge /
+##                      settle position jiggle while the "attack" anim plays.
+## The crescent slash + blade-rotation peak (frame 3 of the attack anim)
+## lands at attack_delay + T_IMPACT = ANIM_MOVE_DURATION + 0.20 = 0.46s, and
+## damage / push / kill effects fire at that same moment.
 const T_ANTICIPATE := 0.07
 const T_LUNGE      := 0.15
 const T_SETTLE     := 0.07
@@ -112,10 +118,11 @@ const T_IMPACT     := 0.20
 ##   king           50   80   70  180  130   70   = 580  (archmage — slowest)
 ##   bandit_pawn    60   80   60  130   80   50   = 460  (assassin — snappy)
 ##
-## All durations >= position-tween length (0.290 s) so the body has
-## settled at the target square by the time the weapon's recovery
-## frames play — reads as the weapon having weight that takes a beat
-## to return after the body lands.
+## All durations >= the strike-phase position-tween length (0.290 s)
+## so the body has settled at the target square by the time the weapon's
+## recovery frames play — reads as the weapon having weight that takes a
+## beat to return after the body lands. The attack anim runs entirely
+## within phase 2 (in place at dest); phase 1 plays the "move" anim.
 const ATTACK_FRAME_DURATIONS := {
 	"pawn":        [0.050, 0.080, 0.070, 0.130, 0.080, 0.050],
 	"bishop":      [0.050, 0.080, 0.070, 0.140, 0.090, 0.060],
@@ -716,6 +723,11 @@ func _make_square(sq: int) -> Button:
 	weapon.name = "Weapon"
 	weapon.visible = false
 	sprite.add_child(weapon)
+
+	# Note: there is no Flash child on board squares — flash only plays
+	# during the attack anim, which happens on a transient floating piece
+	# in anim_overlay (see _create_floating_piece). The board square's
+	# Sprite stays static, so a Flash child here would just be dead weight.
 
 	# HP badge (top-left). Compact "x/y" with a dark plate behind it for
 	# readability against the cream/dark wood tile colors.
@@ -1485,6 +1497,19 @@ func _create_floating_piece(piece: Piece, sq: int) -> TextureRect:
 	weapon.name = "Weapon"
 	weapon.visible = false
 	tr.add_child(weapon)
+	# Flash overlay child — 96x96 displayed at -16 offset so its center
+	# aligns with the 64x64 piece sprite center. Frame-swapped during
+	# the attack anim by _schedule_piece_anim when weapon_flash_<anim> exists.
+	var flash := TextureRect.new()
+	flash.position = Vector2(-16, -16)
+	flash.size = Vector2(96, 96)
+	flash.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	flash.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	flash.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	flash.name = "Flash"
+	flash.visible = false
+	tr.add_child(flash)
 	_apply_piece_textures(tr, piece.def_id, piece.color)
 	anim_overlay.add_child(tr)
 	return tr
@@ -1543,7 +1568,9 @@ func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
 	var dict: Dictionary = SpriteFactory.piece_frames(def_id, color)
 	var body_key := "body_%s" % anim
 	var weapon_key := "weapon_%s" % anim
+	var flash_key := "weapon_flash_%s" % anim
 	var weapon_child: TextureRect = lbl.get_node_or_null("Weapon")
+	var flash_child: TextureRect = lbl.get_node_or_null("Flash")
 	# Theatrical pacing: when this piece has explicit per-frame durations
 	# for this anim, use weighted timing so the peak strike frame lingers
 	# instead of flashing by in 1/N of total_dur.
@@ -1557,12 +1584,110 @@ func _schedule_piece_anim(tween: Tween, lbl: TextureRect, def_id: String,
 		else:
 			UiMotion.schedule_frame_swaps(tween, lbl, dict[body_key], total_dur, delay)
 			UiMotion.schedule_frame_swaps(tween, weapon_child, dict[weapon_key], total_dur, delay)
+		# Flash overlay (staff casters during attack only) — schedule its
+		# own frame swaps and toggle visibility for the duration of the anim.
+		if flash_child != null and dict.has(flash_key):
+			flash_child.visible = true
+			flash_child.texture = dict[flash_key][0]
+			var anim_dur := total_dur
+			if not weighted_durs.is_empty():
+				anim_dur = 0.0
+				for d in weighted_durs:
+					anim_dur += float(d)
+				UiMotion.weighted_frame_swaps(tween, flash_child, dict[flash_key], weighted_durs, delay)
+			else:
+				UiMotion.schedule_frame_swaps(tween, flash_child, dict[flash_key], total_dur, delay)
+			# Hide flash again after the anim finishes (so static piece
+			# render doesn't show a leftover burst frame).
+			tween.tween_callback(_hide_flash_child.bind(flash_child)) \
+				.set_delay(delay + anim_dur)
 		return
 	if not dict.has(anim): return
 	if not weighted_durs.is_empty():
 		UiMotion.weighted_frame_swaps(tween, lbl, dict[anim], weighted_durs, delay)
 	else:
 		UiMotion.schedule_frame_swaps(tween, lbl, dict[anim], total_dur, delay)
+
+## Spawn the impact-burst FX at the target square. Staff casters
+## (bishop / king / queen) get a magic radial-sparkle spread tinted to
+## their gem color — six glyphs scatter outward from the strike point
+## while a brighter center rune scales up. Everyone else gets the
+## original ✸ flare. The two variants share identical timing — start at
+## impact_t, peak ~+0.22s, fade ~+0.30s — so chained damage flashes
+## sync correctly either way.
+func _spawn_attack_impact_fx(tween: Tween, to_sq: int, def_id: String,
+							   impact_t: float, floats: Array) -> void:
+	var caster_color: Color
+	var is_magic := true
+	match def_id:
+		"bishop":
+			caster_color = Color(1.55, 1.15, 0.45)  # gold
+		"king":
+			caster_color = Color(1.20, 0.65, 1.40)  # purple
+		"queen":
+			caster_color = Color(0.55, 1.50, 1.30)  # teal
+		_:
+			is_magic = false
+			caster_color = Color(1.55, 1.15, 0.45)
+
+	if is_magic:
+		# Center rune — bigger, slower spin, sits on the strike point.
+		var center_fx := _create_fx_label("✦", to_sq, caster_color)
+		floats.append(center_fx)
+		center_fx.scale = Vector2(0.20, 0.20)
+		center_fx.modulate.a = 0.0
+		tween.tween_property(center_fx, "modulate:a", 1.0, 0.04).set_delay(impact_t)
+		tween.tween_property(center_fx, "scale", Vector2(2.85, 2.85), 0.24) \
+			.set_delay(impact_t) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tween.tween_property(center_fx, "modulate:a", 0.0, 0.20) \
+			.set_delay(impact_t + 0.08)
+		tween.tween_property(center_fx, "rotation", -PI * 0.5, 0.24).set_delay(impact_t)
+		# Six radial sparkles — start from center, fly outward to the
+		# corners of the target square, fade as they scatter.
+		var glyphs: Array[String] = ["✧", "✦", "✶", "✧", "✦", "✶"]
+		var radial_dist := 24.0
+		for k in 6:
+			var angle: float = float(k) * (TAU / 6.0) + PI / 6.0
+			var off := Vector2(cos(angle) * radial_dist, sin(angle) * radial_dist)
+			var sparkle := _create_fx_label(glyphs[k], to_sq, caster_color)
+			sparkle.add_theme_font_size_override("font_size", 32)
+			floats.append(sparkle)
+			sparkle.scale = Vector2(0.15, 0.15)
+			sparkle.modulate.a = 0.0
+			var start_pos := sparkle.position
+			tween.tween_property(sparkle, "modulate:a", 1.0, 0.05) \
+				.set_delay(impact_t + 0.02)
+			tween.tween_property(sparkle, "position", start_pos + off, 0.24) \
+				.set_delay(impact_t + 0.02) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+			tween.tween_property(sparkle, "scale", Vector2(0.95, 0.95), 0.22) \
+				.set_delay(impact_t + 0.02)
+			tween.tween_property(sparkle, "modulate:a", 0.0, 0.16) \
+				.set_delay(impact_t + 0.10)
+			tween.tween_property(sparkle, "rotation", angle * 1.5, 0.22) \
+				.set_delay(impact_t + 0.02)
+	else:
+		var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
+		floats.append(fx)
+		fx.scale = Vector2(0.25, 0.25)
+		fx.modulate.a = 0.0
+		tween.tween_property(fx, "modulate:a", 1.0, 0.05).set_delay(impact_t)
+		tween.tween_property(fx, "scale", Vector2(2.6, 2.6), 0.22) \
+			.set_delay(impact_t) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		tween.tween_property(fx, "modulate:a", 0.0, 0.18) \
+			.set_delay(impact_t + 0.10)
+		tween.tween_property(fx, "rotation", 0.65, 0.22).set_delay(impact_t)
+
+
+## Hide + clear the flash overlay child after an attack anim finishes,
+## so a leftover burst frame doesn't bake into the static piece render.
+func _hide_flash_child(flash_child: TextureRect) -> void:
+	if is_instance_valid(flash_child):
+		flash_child.visible = false
+		flash_child.texture = null
+
 
 ## Knight / Alter Knight parabolic arc — driven by tween_method so the
 ## position computation is per-tick and overrides the linear lerp the
@@ -1685,46 +1810,62 @@ func _animate_events(old_state: GameState, events: Array) -> void:
 			var jumps := def_id == "knight" or def_id == "alter_knight"
 
 			if is_attack:
-				## ANTICIPATE — small pull-back, opposite of the attack vector.
+				## PHASE 1 — TRAVEL: piece moves from src to dest playing
+				## the "move" anim (or "move_jump" for knight-class pieces).
+				## The piece is planted at the target square at end-of-travel;
+				## phase 2 plays the strike in place.
+				var travel_dur := ANIM_MOVE_DURATION
+				if jumps:
+					tween.tween_method(_set_knight_arc_pos.bind(lbl, from_pos, to_pos),
+						0.0, 1.0, travel_dur) \
+						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+					_schedule_piece_anim(tween, lbl, def_id, color, "move_jump",
+						travel_dur, 0.0)
+				else:
+					tween.tween_property(lbl, "position", to_pos, travel_dur) \
+						.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+					_schedule_piece_anim(tween, lbl, def_id, color, "move",
+						travel_dur, 0.0)
+
+				## PHASE 2 — STRIKE in place at the destination square.
+				## Anticipate (wind-up back toward src) → lunge (thrust past
+				## dest in the attack direction) → settle back at dest. The
+				## attack anim (with crescent slash on F3 for swords) plays
+				## in lockstep starting at the same moment.
+				var attack_delay := travel_dur
 				var dir := (to_pos - from_pos)
 				var dlen := dir.length()
 				var unit := dir / dlen if dlen > 0.001 else Vector2.ZERO
-				var anticipate_pos := from_pos - unit * 10.0
-				var overshoot_pos  := to_pos   + unit * 10.0
+				var anticipate_pos := to_pos - unit * 8.0
+				var overshoot_pos  := to_pos + unit * 10.0
 				tween.tween_property(lbl, "position", anticipate_pos, T_ANTICIPATE) \
+					.set_delay(attack_delay) \
 					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-				## LUNGE — fast, accelerating, slightly past the target square.
 				tween.tween_property(lbl, "position", overshoot_pos, T_LUNGE) \
-					.set_delay(T_ANTICIPATE) \
+					.set_delay(attack_delay + T_ANTICIPATE) \
 					.set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_IN)
-				## SETTLE — snap-back to actual target square.
 				tween.tween_property(lbl, "position", to_pos, T_SETTLE) \
-					.set_delay(T_ANTICIPATE + T_LUNGE) \
+					.set_delay(attack_delay + T_ANTICIPATE + T_LUNGE) \
 					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 
 				## Pose frames — alter knight uses the deliberate spear-thrust
 				## "lunge" pose set; everyone else uses the snappy "attack" jab.
 				var attack_anim := "attack_lunge" if def_id == "alter_knight" else "attack"
 				_schedule_piece_anim(tween, lbl, def_id, color, attack_anim,
-					T_ANTICIPATE + T_LUNGE + T_SETTLE, 0.0)
+					T_ANTICIPATE + T_LUNGE + T_SETTLE, attack_delay)
 
 				## IMPACT BURST — sprite at target square; spawn pre-hidden,
 				## scale up + spin + fade in/out. Pure Tween, no particles.
-				var fx := _create_fx_label("✸", to_sq, Color(1.55, 1.15, 0.45))
-				floats.append(fx)
-				fx.scale = Vector2(0.25, 0.25)
-				fx.modulate.a = 0.0
-				tween.tween_property(fx, "modulate:a", 1.0, 0.05).set_delay(T_IMPACT)
-				tween.tween_property(fx, "scale", Vector2(2.6, 2.6), 0.22) \
-					.set_delay(T_IMPACT) \
-					.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-				tween.tween_property(fx, "modulate:a", 0.0, 0.18) \
-					.set_delay(T_IMPACT + 0.10)
-				tween.tween_property(fx, "rotation", 0.65, 0.22).set_delay(T_IMPACT)
+				## Lands at attack_delay + T_IMPACT, syncing with the attack
+				## anim's F3 peak (crescent slash apex / weapon at full raise).
+				## Staff casters (bishop / king / queen) get a magical rune
+				## burst tinted to their gem instead of the regular flare.
+				var impact_t := attack_delay + T_IMPACT
+				_spawn_attack_impact_fx(tween, to_sq, def_id, impact_t, floats)
 			else:
 				## Plain slide — non-attack move or chain push (which gets a
 				## brief delay so it visually starts at impact moment).
-				var delay := T_IMPACT if (k == "push" and has_attack) else 0.0
+				var delay := (ANIM_MOVE_DURATION + T_IMPACT) if (k == "push" and has_attack) else 0.0
 				var dur := ANIM_MOVE_DURATION
 				if k == "move" and jumps:
 					## Knight / alter knight non-capture move — parabolic arc
@@ -1754,7 +1895,7 @@ func _animate_events(old_state: GameState, events: Array) -> void:
 				hidden.append(_hide_static_sprite(sq))
 				target_lbl = _create_floating_piece(victim, sq)
 				floats.append(target_lbl)
-			var delay: float = T_IMPACT if has_attack else 0.0
+			var delay: float = (ANIM_MOVE_DURATION + T_IMPACT) if has_attack else 0.0
 			## WHITEOUT then RED then back. The whiteout cue is the impact.
 			tween.tween_property(target_lbl, "modulate", Color(2.5, 2.5, 2.5), 0.04) \
 				.set_delay(delay)
@@ -1773,7 +1914,7 @@ func _animate_events(old_state: GameState, events: Array) -> void:
 			var sq := int(ev["sq"])
 			if floats_by_sq.has(sq):
 				var lbl: TextureRect = floats_by_sq[sq]
-				var delay: float = T_IMPACT if has_attack else 0.0
+				var delay: float = (ANIM_MOVE_DURATION + T_IMPACT) if has_attack else 0.0
 				tween.tween_property(lbl, "scale", Vector2(0.25, 0.25),
 					ANIM_KILL_DURATION).set_delay(delay)
 				tween.tween_property(lbl, "modulate:a", 0.0,
