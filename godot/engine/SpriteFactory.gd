@@ -118,8 +118,10 @@ static func _abs(path: String) -> String:
 
 ## Slice a horizontal frame strip PNG into Array[Texture2D]. Returns []
 ## when the file is missing or unreadable so callers can branch on
-## `arr.is_empty()`. Square-frame assumption: each frame is `h x h`.
-static func _load_strip(path: String) -> Array:
+## `arr.is_empty()`. By default frames are SQUARE (each `h x h`); pass
+## `frame_w` for non-square frames (e.g. the tall 64×256 lightning
+## strike strip).
+static func _load_strip(path: String, frame_w: int = -1) -> Array:
 	if not FileAccess.file_exists(path):
 		return []
 	var img := Image.load_from_file(_abs(path))
@@ -129,11 +131,12 @@ static func _load_strip(path: String) -> Array:
 	var h := img.get_height()
 	if h <= 0 or w <= 0:
 		return []
-	var n := w / h
+	var fw := h if frame_w <= 0 else frame_w
+	var n := w / fw
 	var frames: Array = []
 	for i in n:
-		var f := Image.create(h, h, false, Image.FORMAT_RGBA8)
-		f.blit_rect(img, Rect2i(i * h, 0, h, h), Vector2i.ZERO)
+		var f := Image.create(fw, h, false, Image.FORMAT_RGBA8)
+		f.blit_rect(img, Rect2i(i * fw, 0, fw, h), Vector2i.ZERO)
 		frames.append(ImageTexture.create_from_image(f))
 	return frames
 
@@ -166,10 +169,13 @@ static func debris_fall_frames() -> Array:
 	_cache[key] = f
 	return f
 
+## Lightning frames are 64 wide × 256 tall (4 board squares high) so
+## the bolt visibly comes from the sky — see _play_lightning_at in
+## GameScene.gd for the bottom-anchor positioning.
 static func lightning_strike_frames() -> Array:
 	var key := "fx:lightning_strike"
 	if _cache.has(key): return _cache[key]
-	var f := _load_strip("%s/anim/fx/lightning_strike.png" % ASSET_ROOT)
+	var f := _load_strip("%s/anim/fx/lightning_strike.png" % ASSET_ROOT, 64)
 	_cache[key] = f
 	return f
 

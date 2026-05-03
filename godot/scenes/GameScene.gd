@@ -1717,14 +1717,38 @@ func _play_aoe_resolve(tween: Tween, squares: Array, kind: String, floats: Array
 		## Fade out after the last frame so the sprite doesn't linger.
 		tween.tween_property(fx, "modulate:a", 0.0, 0.10).set_delay(ripple + total - 0.05)
 
-## Lightning resolve helper — single-target, no ripple. Plays the
-## prebuilt strike spritesheet and fades out.
+## Lightning resolve helper — single-target, no ripple. The lightning
+## strip uses TALL frames (10 squares high) so the bolt always reads
+## as coming from the SKY (or off-screen-above) regardless of which
+## board row is the target: the sprite is sized SQ_SIZE wide ×
+## SQ_SIZE*10 tall and anchored so its BOTTOM aligns with the target
+## square's bottom. With the board 8 squares tall, anchoring a
+## 10-square sprite at any target row guarantees the sprite's TOP
+## extends above the top of the board → the strike is unambiguously
+## from above. The bolt's source-art ground line is at y≈628/640 so
+## the impact spark lands inside the target square exactly.
+const LIGHTNING_SQUARES_TALL := 10  # source frames are 10 squares high
+
 func _play_lightning_at(tween: Tween, sq: int, floats: Array) -> void:
 	var frames: Array = SpriteFactory.lightning_strike_frames()
 	if frames.is_empty(): return
 	var per_frame := 0.07
 	var total := per_frame * float(frames.size())
-	var fx := _create_fx_sprite(sq, frames)
+	var fx := TextureRect.new()
+	fx.texture = frames[0]
+	fx.size = Vector2(SQ_SIZE, SQ_SIZE * LIGHTNING_SQUARES_TALL)
+	# Anchor the bottom of the sprite at the target square's bottom —
+	# (LIGHTNING_SQUARES_TALL - 1) squares of the sprite extend UP above
+	# the target onto the squares overhead, giving the "from the sky"
+	# read regardless of which row is targeted.
+	var sq_pos := _sq_to_pos(sq)
+	fx.position = Vector2(sq_pos.x,
+		sq_pos.y - SQ_SIZE * (LIGHTNING_SQUARES_TALL - 1))
+	fx.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	fx.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	fx.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	anim_overlay.add_child(fx)
 	floats.append(fx)
 	UiMotion.schedule_frame_swaps(tween, fx, frames, total, 0.0)
 	tween.tween_property(fx, "modulate:a", 0.0, 0.12).set_delay(total - 0.06)

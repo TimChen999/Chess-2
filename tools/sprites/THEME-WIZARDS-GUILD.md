@@ -874,19 +874,111 @@ Procedural composition (`build_fireball()` in `wizard_vfx.py`):
 | 7–11 | explosion expands (scale 0.55 → 1.20, fades opacity) |
 | 12–13 | smoke dissipates (50% then 20% opacity) |
 
-### 6b. Lightning — `lightning_strike.png` (6 frames)
+### 6b. Lightning — `lightning_strike.png` (6 frames, **tall sky-strike**)
 
-Atoms: `lightning_bolt` (full canvas-height jagged zigzag),
-`lightning_flash` (white impact flash), `lightning_glow` (yellow halo).
+Reads as a **true sky-strike**: the lightning sprite is **TEN board
+squares tall** (64 wide × 640 tall in source pixels — a deliberate
+break from the 64×64 single-square assumption used by the other VFX).
+The board is 8 squares tall, so anchoring a 10-square sprite to any
+target row guarantees the sprite's top edge extends above the top of
+the board → the strike *always* reads as coming from off-screen
+above, no matter which square is hit. The bolt grows downward across
+F0–F2, lands at the ground line at F3 with a bright radial impact
+spark, and dissipates over F4–F5.
 
-| frame | content |
-|---|---|
-| 0 | faint glow at top y=8 |
-| 1 | full bolt stretched to canvas height |
-| 2 | bright flash at impact (y=50) |
-| 3 | bolt fading + glow at impact |
-| 4 | small dim glow |
-| 5 | barely-visible glow remnant |
+In Godot the sprite is anchored so its **bottom edge aligns with the
+target square's bottom**, putting the impact spark inside the target
+square and the descending bolt on the column above. See
+`_play_lightning_at()` + `LIGHTNING_SQUARES_TALL = 10` in
+[GameScene.gd](../../godot/scenes/GameScene.gd). Earlier iterations
+shipped with `LIGHTNING_SQUARES_TALL = 4`, but for targets in the
+lower rows of the board the bolt's top edge landed mid-board rather
+than off-screen, so the strike read as "bolt appearing 3 squares
+above target" instead of "bolt from the sky" — fixed by going to 10.
+
+**Atoms** (in `_pixellab_cache/`):
+
+The bolt itself is rendered as **five distinct PixelLab sprites** —
+one per visible-bolt frame — so every frame's silhouette is unique
+rather than the same source clipped at different heights. This is
+what gives the strike its dynamic flicker (real lightning never
+draws the same path twice; neither does this animation).
+
+| atom | seed | prompt | use |
+|---|---|---|---|
+| `lightning_bolt_tall` | 8211 | "thin tall bolt … multiple zigzag bends" | F0 — bolt forming high in sky |
+| `lightning_bolt_b` | 8221 | (same) | F1 — bolt mid-descent |
+| `lightning_bolt_c2` | 8232 | "sharp angular line segments … classic Z-shape" | F2 — bolt reaches ground |
+| `lightning_bolt_d2` | 8242 | (same Z-shape prompt) | F3 — PEAK |
+| `lightning_bolt_e` | 8251 | "thin tall bolt … multiple zigzag bends" | F4 — fading |
+| `lightning_flash` | 8202 | "bright white circular impact flash with yellow rays" | impact spark (F2-F4) |
+| `lightning_glow` | 8203 | "soft yellow glow halo, mostly transparent" | F5 residual |
+
+The first re-roll of `lightning_bolt_c` (seed 8231) and `lightning_bolt_d`
+(seed 8241) under the loose prompt produced smooth columnar / flame
+shapes that didn't read as zigzag once stretched, so they were
+re-rolled with seeds 8232 / 8242 under a stricter "classic Z-shape …
+NOT a smooth column, NOT a flame" prompt. Left in cache for diffing.
+
+The earlier `lightning_bolt` atom (seed 8201) was a small emoji-style
+bolt and isn't referenced by the shipping pipeline either.
+
+**Composition** (`build_lightning()` in `wizard_vfx.py`):
+
+Frame size: `LIGHTNING_FRAME_W = 64`, `LIGHTNING_FRAME_H = 640`.
+`LIGHTNING_GROUND_Y = 628` is the y-coordinate (in source-pixel
+units) of the strike point — close to the bottom of the canvas so
+the impact spark lands inside the target square once the sprite is
+bottom-anchored in Godot.
+
+Each of the five PixelLab bolt atoms gets stretched independently
+via `_stretch_bolt_to_canvas()` — height-driven scale to a 624-px
+sprite that spans the full canvas height with a 4-px breathing room
+at the top, horizontally centered, width capped at `max_w = 18` so
+the bolt stays thin after the ~10× vertical stretch. The result is
+one 640-px-tall canvas per atom (`canvas_a` through `canvas_e`).
+
+`clip_below(img, max_y)` alpha-zeroes pixels below `max_y` and is
+used **only** on F0 and F1 to convey sky-descent (the bolt hasn't
+struck ground yet). The clipped sources are different atoms (a vs b),
+so even the descending bolt has a different silhouette frame to frame.
+
+| frame | source bolt | clip | overlay | reads as |
+|---|---|---|---|---|
+| 0 | canvas_a | y ≤ 256 (top ~40%) | — | bolt forming high in the sky, several squares above target |
+| 1 | canvas_b | y ≤ 480 (top ~75%) | — | different bolt mid-descent, ~1 square above target |
+| 2 | canvas_c | full | small spark at y=628 (alpha 0.55, scale 0.55) | bolt reaches ground |
+| 3 | canvas_d | full | **PEAK** spark at y=626 (alpha 1.0, scale 1.05) | bright strike — damage applies here |
+| 4 | canvas_e (alpha 0.45) | full | wide fading spark at y=626 (alpha 0.7, scale 1.30) | post-strike afterglow |
+| 5 | (none) | — | residual glow at y=626 (alpha 0.4, scale 0.85) | dissipating |
+
+No two consecutive frames share a bolt silhouette — the strike
+flickers like real lightning rather than rendering the same source
+clipped at different heights.
+
+`LIGHTNING_GROUND_Y = 244` (a constant in `wizard_vfx.py`) is the
+y-coordinate of the strike point in source-pixel units — it lines up
+with the bottom of the target square in Godot once the sprite is
+anchored. The bolt's full opacity at F3 doubles as the impact-cue
+frame (damage applies the moment the player sees the peak spark).
+
+**Godot wiring** — `_play_lightning_at()` in
+[GameScene.gd](../../godot/scenes/GameScene.gd):
+
+- `LIGHTNING_SQUARES_TALL = 10` — number of board squares the sprite
+  spans vertically. The board is 8 squares tall, so this is enough
+  margin that the sprite top is always above the board top regardless
+  of which row is the target.
+- TextureRect is sized `(SQ_SIZE, SQ_SIZE * 10)` and positioned at
+  `(sq_pos.x, sq_pos.y - SQ_SIZE * 9)` — one square's worth at the
+  bottom holds the impact spark inside the target square; nine
+  squares above hold the descending bolt (clipped by the board's
+  visible area, which is exactly the desired "from off-screen above"
+  read).
+- `SpriteFactory._load_strip(path, frame_w)` accepts an explicit
+  `frame_w` param so the lightning's non-square frames slice
+  correctly. Defaults to `frame_w = h` (square frames) for every
+  other VFX strip.
 
 ### 6c. Magic rocks — `debris_fall.png` (9 frames)
 

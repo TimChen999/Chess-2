@@ -180,14 +180,108 @@ def build_fireball(client, force: bool) -> Image.Image:
 
 
 # ---------------------------------------------------------------------------
-# LIGHTNING — 6 frames: charge glow → bolt → flash → fade
+# LIGHTNING — 6 frames on a TALL canvas (64×256, 4 board squares tall).
+# Reads as a true sky-strike: bolt grows downward across F0-F2 covering
+# 4 squares of vertical extent, lands at the BOTTOM of the canvas
+# (which Godot anchors to the target square's bottom), explodes into a
+# radial spark on F3, then bolt+spark dissipate over F4-F5.
+#
+# The taller-than-square canvas is what makes the bolt feel like it
+# comes from the sky — Godot positions the sprite so its bottom-72px
+# fits the target square and its remaining 216 px extends UP above the
+# target onto the squares overhead.
 # ---------------------------------------------------------------------------
 
+LIGHTNING_FRAME_W = 64
+LIGHTNING_FRAME_H = 640        # 10 squares tall in source-pixel units —
+                                # tall enough that the bolt's top edge is
+                                # always at or above the top of the board
+                                # regardless of which row the target is in,
+                                # so the strike always reads as coming from
+                                # the sky / off-screen above.
+LIGHTNING_GROUND_Y = 628       # bolt tip + spark land here (~98% down)
+
+
+def clip_below(img: Image.Image, max_y: int) -> Image.Image:
+    """Return a copy of img where every pixel with y > max_y has alpha 0.
+    Used to reveal the lightning bolt progressively from the top."""
+    out = img.convert("RGBA").copy()
+    p = out.load()
+    w, h = out.size
+    for y in range(max(0, max_y + 1), h):
+        for x in range(w):
+            r, g, b, a = p[x, y]
+            if a:
+                p[x, y] = (r, g, b, 0)
+    return out
+
+
+def _place_centered_xy(canvas_w: int, canvas_h: int, atom: Image.Image,
+                        cx: int, cy: int) -> Image.Image:
+    """place_centered() variant that takes separate w/h (so we can place
+    onto a non-square canvas like the 64x256 lightning frame)."""
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    a = trim(atom)
+    aw, ah = a.size
+    canvas.paste(a, (cx - aw // 2, cy - ah // 2), a)
+    return canvas
+
+
+def _stretch_bolt_to_canvas(bolt_atom: Image.Image,
+                              fw: int, fh: int,
+                              ground_y: int,
+                              max_w: int = 18) -> Image.Image:
+    """Stretch a bolt atom to span from the top of the canvas down to
+    `ground_y`, horizontally centered. Width is capped at `max_w` so
+    the bolt stays thin after the vertical stretch."""
+    bolt_trim = trim(bolt_atom)
+    bw, bh = bolt_trim.size
+    target_h = ground_y - 4
+    scale = target_h / bh
+    new_w = max(2, int(bw * scale))
+    if new_w > max_w:
+        new_w = max_w
+    stretched = bolt_trim.resize((new_w, target_h), Image.NEAREST)
+    canvas = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
+    canvas.paste(stretched, (fw // 2 - new_w // 2, 4), stretched)
+    return canvas
+
+
 def build_lightning(client, force: bool) -> Image.Image:
-    bolt = gen_atom(client, "lightning_bolt",
-                    "a tall vertical jagged bright white-yellow lightning bolt with two short branching forks, dark outline",
-                    seed=8201, force=force)
-    flash = gen_atom(client, "lightning_flash",
+    # FIVE distinct bolt sprites — different PixelLab seeds give each
+    # a unique zigzag path so every frame has its OWN bolt rather than
+    # the same source clipped at different heights. Reads as real
+    # lightning where each flash flickers a different shape.
+    bolt_prompt = (
+        "a single thin tall lightning bolt that spans the entire vertical extent "
+        "of the frame from top edge to bottom edge, multiple sharp zigzag bends "
+        "along its length, bright electric white core with pale blue glow halo, "
+        "no branches, no forks"
+    )
+    # Stricter prompt for re-rolls — the loose bolt prompt sometimes
+    # produces a smooth column / flame shape instead of an angular
+    # zigzag, which doesn't read as lightning once stretched.
+    zigzag_prompt = (
+        "a single thin jagged lightning bolt made of sharp straight angular line "
+        "segments with sudden direction changes every few pixels, classic Z-shape "
+        "or N-shape zigzag pattern, vertical orientation, white electric core with "
+        "blue outline, NOT a smooth column, NOT a flame, NOT a curved line"
+    )
+    bolt_a = gen_atom(client, "lightning_bolt_tall", bolt_prompt,
+                      seed=8211, force=force)
+    bolt_b = gen_atom(client, "lightning_bolt_b", bolt_prompt,
+                      seed=8221, force=force)
+    # bolt_c (seed 8231) and bolt_d (seed 8241) gave smooth columnar
+    # shapes; regenerated under different seeds with a stricter zigzag
+    # prompt. The original seeds stay in cache for diff purposes.
+    bolt_c = gen_atom(client, "lightning_bolt_c2", zigzag_prompt,
+                      seed=8232, force=force)
+    bolt_d = gen_atom(client, "lightning_bolt_d2", zigzag_prompt,
+                      seed=8242, force=force)
+    bolt_e = gen_atom(client, "lightning_bolt_e", bolt_prompt,
+                      seed=8251, force=force)
+
+    spark = gen_atom(client, "lightning_flash",
                      "a bright white circular impact flash with yellow rays radiating outward",
                      seed=8202, force=force)
     glow = gen_atom(client, "lightning_glow",
@@ -195,44 +289,62 @@ def build_lightning(client, force: bool) -> Image.Image:
                     seed=8203, force=force)
 
     n = 6
-    strip = Image.new("RGBA", (FRAME * n, FRAME), (0, 0, 0, 0))
+    fw = LIGHTNING_FRAME_W
+    fh = LIGHTNING_FRAME_H
+    strip = Image.new("RGBA", (fw * n, fh), (0, 0, 0, 0))
 
-    # Frame 0: faint charging glow at top
-    glow_scaled = resize_atom(glow, 0.6)
-    f0 = place_centered(FRAME, fade(glow_scaled, 0.55),
-                        FRAME // 2, 8)
+    # Five independent stretched-to-canvas bolt sprites. Each frame
+    # below uses its own bolt — the only "clipping" happens on F0/F1
+    # which legitimately need a partial bolt (sky-descent stage), and
+    # those clips are applied to DIFFERENT source sprites so no two
+    # frames share a silhouette.
+    canvas_a = _stretch_bolt_to_canvas(bolt_a, fw, fh, LIGHTNING_GROUND_Y)
+    canvas_b = _stretch_bolt_to_canvas(bolt_b, fw, fh, LIGHTNING_GROUND_Y)
+    canvas_c = _stretch_bolt_to_canvas(bolt_c, fw, fh, LIGHTNING_GROUND_Y)
+    canvas_d = _stretch_bolt_to_canvas(bolt_d, fw, fh, LIGHTNING_GROUND_Y)
+    canvas_e = _stretch_bolt_to_canvas(bolt_e, fw, fh, LIGHTNING_GROUND_Y)
+
+    # F0: bolt_a, only the top ~40% revealed — bolt forming high in sky.
+    # On the 10-square-tall canvas this is roughly the top 4 squares of
+    # the bolt, which on screen translates to the bolt being visible from
+    # off-screen-above down to ~3 squares above the target square.
+    f0 = clip_below(canvas_a, int(fh * 0.40))
     strip.paste(f0, (0, 0), f0)
 
-    # Frame 1: full lightning bolt from top to bottom
-    bolt_trim = trim(bolt)
-    # Stretch bolt to full canvas height (64 px tall)
-    bw, bh = bolt_trim.size
-    target_h = 56
-    scale = target_h / bh
-    bolt_full = bolt_trim.resize((max(1, int(bw * scale)), target_h),
-                                  Image.NEAREST)
-    f1 = place_centered(FRAME, bolt_full, FRAME // 2, FRAME // 2)
-    strip.paste(f1, (FRAME, 0), f1)
+    # F1: bolt_b, top ~75% revealed — different zigzag, mid-descent.
+    # Visible from off-screen-above down to ~1 square above target.
+    f1 = clip_below(canvas_b, int(fh * 0.75))
+    strip.paste(f1, (fw, 0), f1)
 
-    # Frame 2: bright flash at impact (bottom of canvas)
-    flash_scaled = resize_atom(flash, 0.85)
-    f2 = place_centered(FRAME, flash_scaled, FRAME // 2, 50)
-    strip.paste(f2, (2 * FRAME, 0), f2)
+    # F2: bolt_c full + small spark forming at the strike point.
+    f2 = canvas_c.copy()
+    spark_small = resize_atom(spark, 0.55)
+    spark_early = _place_centered_xy(fw, fh, fade(spark_small, 0.55),
+                                      fw // 2, LIGHTNING_GROUND_Y)
+    f2 = Image.alpha_composite(f2, spark_early)
+    strip.paste(f2, (2 * fw, 0), f2)
 
-    # Frame 3: bolt fading + glow at impact
-    f3 = place_centered(FRAME, fade(bolt_full, 0.35),
-                        FRAME // 2, FRAME // 2)
-    glow_at_impact = resize_atom(glow, 0.7)
-    layer3 = place_centered(FRAME, fade(glow_at_impact, 0.7),
-                            FRAME // 2, 50)
-    f3 = Image.alpha_composite(f3, layer3)
-    strip.paste(f3, (3 * FRAME, 0), f3)
+    # F3 PEAK: bolt_d (different jagged path again) + bright impact spark.
+    f3 = canvas_d.copy()
+    spark_peak = resize_atom(spark, 1.05)
+    spark_layer3 = _place_centered_xy(fw, fh, spark_peak,
+                                       fw // 2, LIGHTNING_GROUND_Y - 2)
+    f3 = Image.alpha_composite(f3, spark_layer3)
+    strip.paste(f3, (3 * fw, 0), f3)
 
-    # Frames 4-5: glow shrinks
-    for i, (op_, sc) in enumerate([(0.5, 0.55), (0.2, 0.4)]):
-        g = resize_atom(glow, sc)
-        f = place_centered(FRAME, fade(g, op_), FRAME // 2, 50)
-        strip.paste(f, ((4 + i) * FRAME, 0), f)
+    # F4: bolt_e fading + spark expanding outward.
+    f4 = fade(canvas_e, 0.45)
+    spark_wide = resize_atom(spark, 1.30)
+    spark_layer4 = _place_centered_xy(fw, fh, fade(spark_wide, 0.70),
+                                       fw // 2, LIGHTNING_GROUND_Y - 2)
+    f4 = Image.alpha_composite(f4, spark_layer4)
+    strip.paste(f4, (4 * fw, 0), f4)
+
+    # F5: bolt gone, residual glow at the strike point.
+    glow_scaled = resize_atom(glow, 0.85)
+    f5 = _place_centered_xy(fw, fh, fade(glow_scaled, 0.40),
+                             fw // 2, LIGHTNING_GROUND_Y - 2)
+    strip.paste(f5, (5 * fw, 0), f5)
     return strip
 
 
