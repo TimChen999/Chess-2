@@ -1,15 +1,17 @@
 # Medieval stage — generation plan
 
-Reskin of the board (8x8 grid + frame) and the GameScene-wide backdrop to
-match the stylized medieval theme already established by the cards and FX.
-No layout changes: square pitch stays at `SQ_SIZE = 72` and the grid stays
-8x8 ([GameScene.gd:18](../../godot/scenes/GameScene.gd#L18)). Everything is
-added as PNG atoms generated via PixelLab and assembled by Godot's existing
-`GridContainer` + `NinePatchRect` + `TextureRect` (TILE) primitives.
+Reskin of the board (8x8 grid + frame), a viewport-wide backdrop, and a
+board-sized macro-detail overlay. No layout changes: square pitch stays
+at `SQ_SIZE = 72` and the grid stays 8x8
+([GameScene.gd:18](../../godot/scenes/GameScene.gd#L18)). Everything is
+added as PNG atoms generated via PixelLab and assembled by Godot's
+existing `GridContainer` + `NinePatchRect` + `TextureRect` primitives.
 
 PixelLab never generates the grid as a whole image. It only generates
-**single repeatable units**: one tile (4 of them, see below), one wood-edge
-atlas, one backdrop tile. Godot does the duplication.
+**single repeatable units** (one light tile, one dark tile, one wood-
+edge atlas, one backdrop tile) plus **one non-tiling board-sized
+overlay** carrying all the macro detail (moss, cracks, dust, scuffs).
+Godot does the duplication and compositing.
 
 ---
 
@@ -17,32 +19,36 @@ atlas, one backdrop tile. Godot does the duplication.
 
 | Asset | Native size | Generator | Output path |
 |---|---|---|---|
-| Light tile A | 64x64 | PixelLab pixflux | `godot/assets/sprites/tiles/medieval/light_a.png` |
-| Light tile B | 64x64 | PixelLab pixflux | `godot/assets/sprites/tiles/medieval/light_b.png` |
-| Dark tile A  | 64x64 | PixelLab pixflux | `godot/assets/sprites/tiles/medieval/dark_a.png`  |
-| Dark tile B  | 64x64 | PixelLab pixflux | `godot/assets/sprites/tiles/medieval/dark_b.png`  |
+| Light tile | 64x64 | **PIL procedural** | `godot/assets/sprites/tiles/medieval/light.png` |
+| Dark tile | 64x64 | **PIL procedural** | `godot/assets/sprites/tiles/medieval/dark.png` |
+| Floor overlay (transparent) | 512x512 (256→2× nearest) | PixelLab pixflux | `godot/assets/sprites/ui/floor_overlay_medieval.png` |
 | Wood frame atlas | 48x48 (3x3 of 16px cells) | PixelLab pixflux + PIL slice | `godot/assets/sprites/ui/frame_medieval.png` |
 | Backdrop tile | 128x128 | PixelLab pixflux | `godot/assets/sprites/ui/backdrop_medieval.png` |
 
-Total PixelLab API calls: **6** (4 tiles + 1 frame + 1 backdrop).
-Cost: a few cents.
+Total PixelLab API calls: **3** (1 overlay + 1 frame + 1 backdrop). Tiles
+are PIL-procedural (zero API cost). One tile per color; the 2×2 sub-
+stone variant was tried and dropped because the interior crosses read
+as visual noise at the actual board scale.
 
-The 4-tile design (2 light + 2 dark variants) breaks up the obvious 1-tile
-repeat without exploding the seam matrix. Variant per square is picked
-deterministically:
+### Why this layered split
 
-```
-variant = ((file * 7 + rank * 13) >> 1) & 1
-```
-
-So `a1` always picks the same variant on every render — no flicker, no RNG.
+The two failure modes for a tiled chessboard are: (a) the tile texture
+is too busy and the 8×8 repeat reads as a polka-dot grid, (b) the tile
+texture is too plain and the floor reads as flat plastic. The
+plain-tile + macro-overlay split sidesteps both: the per-tile sprite
+is **deliberately plain** (uniform stone with subtle edge shading), so
+identical adjacency is invisible; the **overlay** is one board-sized
+non-tiling PNG that sprinkles natural detail (moss, hairline cracks,
+dust, scuffs) across the full 8×8 area at irregular positions, so the
+detail itself never repeats. Net effect: the grid reads as one
+continuous floor with character.
 
 ---
 
 ## 2. Generation pipeline
 
-New script: `tools/stages/gen_medieval.py`. Models the same
-atoms-with-PIL-post pattern used by [../sprites/wizard_vfx.py](../sprites/wizard_vfx.py)
+Script: `tools/stages/gen_medieval.py`. Models the same atoms-with-PIL-
+post pattern used by [../sprites/wizard_vfx.py](../sprites/wizard_vfx.py)
 and [../sprites/gen_sprites.py](../sprites/gen_sprites.py).
 
 ```
@@ -55,41 +61,69 @@ for each asset:
 ```
 
 Cache-on-seed mirrors `wizard_vfx.py:cache_path` so re-runs reuse the
-same raw PixelLab bytes; only the PIL post-pass re-executes when we tweak
-seam logic. `--force` bypasses cache, `--only <asset>` regenerates one.
+same raw PixelLab bytes; only the PIL post-pass re-executes when we
+tweak seam logic. `--force` bypasses cache, `--only <group>`
+regenerates one group (`tiles | overlay | frame | backdrop`).
 
-### 2.1 Tiles — prompt template
+### 2.1 Tiles — PIL procedural
 
-Style suffix shared across all 4 tile prompts to lock the look:
+Both tiles are drawn in PIL, no PixelLab call. Why procedural:
+
+- PixelLab repeatedly added internal cracks / mortar / structure even
+  when prompted not to, breaking the seam-alignment requirement.
+- We need precise control over the groove geometry so adjacent tiles
+  butt seamlessly across the whole 8×8 board.
+- "Interesting" detail comes from the macro overlay layer, so the
+  stone face only needs to read as a believable flat surface.
+
+Per-tile shape:
+
+- Flat fill in a warm grey-brown tone (light: `(212,198,170)`, dark:
+  `(108,94,78)` — same hue family, different brightness).
+- Very subtle speckle (±4 brightness on ~10% of pixels, deterministic
+  seed) so the surface isn't a flat painted color.
+- Darker groove (1px) at every outer edge; when two tiles butt, the
+  combined 2px joint reads as a hewn stone seam.
+- 1px lighter bevel one row inside the groove for hint-of-depth.
+
+All "imperfections" (chipping, color jitter on grooves) were tried and
+dropped — they read as pasted-on noise rather than wear.
+
+### 2.2 Floor overlay — board-sized non-tiling detail layer
+
+ONE 512×512 transparent PNG carrying every macro-level detail feature
+that would otherwise repeat if it lived on the tile. Prompt:
 
 ```
-, top-down 64x64 pixel art floor tile, EDGE-TO-EDGE coverage (no border,
-no padding, no vignette, no shadow), uniform mid-tone shading across the
-whole tile, opaque, no transparency, single material, ready to tile
-seamlessly with itself
+scattered organic detail on a fully transparent background — small
+patches of green-grey moss, a few thin hairline cracks, light dust
+streaks, occasional small dark scuffs and pebbles. Distribution is
+IRREGULAR and SPARSE (about 60% of the canvas is empty transparent
+background) and spread asymmetrically across the canvas with NO
+repeating pattern, NO grid alignment, NO central composition, NO
+border. The details should look like natural wear scattered randomly
+across a large stone floor. Pixel art style, soft outlines, no single
+feature larger than 60 pixels.
 ```
 
-Per-tile descriptions:
+Generated with `no_background=True` so the result is RGBA with most
+pixels fully transparent.
 
-- **light_a**: "weathered cream limestone flagstone with faint chisel
-  marks and a subtle warm beige tint"
-- **light_b**: "same cream limestone flagstone with a small hairline
-  crack across one corner and slightly more wear"
-- **dark_a**: "warm aged oak wood plank with visible grain running
-  diagonally, deep umber tone"
-- **dark_b**: "same warm aged oak plank with a small dark knot and
-  slightly different grain direction"
+In Godot the overlay is composited as a single `TextureRect` parented
+to `board_holder` directly above the `GridContainer`, sized to fill
+the 8×8 grid (`SQ_SIZE * 8`), `mouse_filter = MOUSE_FILTER_IGNORE` so
+clicks pass through to the squares underneath.
+`stretch_mode = STRETCH_KEEP_ASPECT_COVERED` so the overlay scales
+with nearest-neighbor filtering to the actual board size.
 
-Both within-pair variants must share the same dominant color so a `light_b`
-neighbor next to a `light_a` reads as "the same floor, slightly varied,"
-not "two different stages glued together." The PIL pass enforces this
-quantitatively (§3.1).
+The overlay is **only added when stage == "medieval"** — classic and
+moon stages skip it entirely.
 
-### 2.2 Wood frame — atlas layout
+### 2.3 Wood frame — atlas layout
 
-PixelLab generates ONE 48x48 image containing a 3x3 atlas of carved-wood
-border pieces (corner / edge / corner stacked top-to-bottom, each 16x16).
-Prompt:
+PixelLab generates ONE 48x48 image containing a 3x3 atlas of carved-
+wood border pieces (corner / edge / corner stacked top-to-bottom, each
+16x16). Prompt:
 
 ```
 3x3 sprite atlas on a 48x48 canvas, each cell exactly 16x16. Top row:
@@ -102,56 +136,62 @@ background bleed between cells.
 ```
 
 PIL post-pass slices the 48x48 into the 9 cells, asserts each cell is
-exactly 16x16, and re-saves as a single 48x48 atlas. The Godot side wraps
-it in a `NinePatchRect` with `patch_margin = 16` on all sides; the engine
-then stretches the edges to whatever board size we pass. Border thickness
-in-game = 16px on every side regardless of board dimensions.
+exactly 16x16, and re-saves as a single 48x48 atlas. The Godot side
+wraps it in a `NinePatchRect` with `patch_margin = 16` on all sides;
+the engine then stretches the edges to whatever board size we pass.
+Border thickness in-game = 16px on every side regardless of board
+dimensions.
 
-### 2.3 Backdrop — full-screen tiling tile
+### 2.4 Backdrop — full-screen tiling tile
 
 Single 128x128 tileable tile. Prompt:
 
 ```
-top-down 128x128 pixel art tavern stone floor, large rough flagstones
-with grout lines, edge-to-edge coverage, uniform mid-tone shading, opaque,
-muted desaturated palette so it sits behind UI without competing, ready
-to tile seamlessly with itself in all directions
+top-down 128x128 pixel art seamless cobblestone wall texture, dense
+uniform field of small irregular grey-brown stone bricks packed tight
+with thin dark mortar lines between every brick, EDGE-TO-EDGE bricks
+that cover the entire canvas with no central focal point, no
+medallion, no circle, no vignette, no border, no shadow, FLAT uniform
+mid-tone lighting across the whole image, opaque, muted desaturated
+palette, ready to tile seamlessly with itself in all directions like a
+repeating wallpaper texture
 ```
 
-Goes on a `TextureRect` parented behind everything in `GameScene`, with
-`stretch_mode = STRETCH_TILE`, anchored to fill the viewport.
+Goes on a `TextureRect` parented behind everything in `GameScene`,
+with `stretch_mode = STRETCH_TILE`, anchored to fill the viewport.
 
 ---
 
 ## 3. Reliability passes (PIL post-processing)
 
-PixelLab does not guarantee dimensions, edge-tileability, or alpha. The
-post-pass is what makes the assets reliable.
+PixelLab does not guarantee dimensions, edge-tileability, or alpha.
+The post-pass is what makes the assets reliable.
 
 ### 3.1 Tile reliability
 
-For each of the 4 tile PNGs:
+Tiles are procedurally drawn so most reliability concerns from a
+PixelLab pipeline are gone by construction (correct dimensions,
+opaque, identical cross-tile edges). The only step needed:
 
-1. **Dimension assert**: `img.size == (64, 64)`. If PixelLab returned a
-   different size, resize via `Image.NEAREST` and warn.
-2. **Opacity assert**: every pixel `alpha == 255`. If any pixel is
-   transparent, fail loudly — a transparent tile would let the backdrop
-   leak through and break the chess look.
-3. **Edge-wrap fix**: copy the left edge column average to the right
-   edge column (and top row to bottom row) using a 2-pixel feather, so
-   the tile butts seamlessly against itself. Same algorithm applied
-   independently per axis.
-4. **Cross-variant color clamp**: for each `(light_a, light_b)` and
-   `(dark_a, dark_b)` pair, compute the mean RGB. If pair-mean RGB
-   distance > threshold (15 in 0–255), shift `*_b` toward `*_a` by an
-   alpha blend until under threshold. Keeps "same floor, slight variation"
-   coherence quantitative, not eyeballed.
-5. **Visual assertion image**: write
-   `tools/stages/_inspect_medieval_tiles.png` — a 4x4 grid of all 4
-   variants tiled twice in each direction. Easy to eyeball whether
-   seams disappear.
+1. **Visual assertion image**: write
+   `tools/stages/_inspect_medieval_tiles.png` — a full 8×8 checkerboard
+   built from the two tiles. Confirms the procedural drawer produced
+   the expected joint pattern.
 
-### 3.2 Frame reliability
+### 3.2 Overlay reliability
+
+For the 512x512 overlay PNG:
+
+1. **Dimension assert**: `img.size == (512, 512)`.
+2. **Mode assert**: RGBA. PixelLab's `no_background=True` should
+   produce this; we just convert if not.
+3. **Visual assertion image**: write
+   `tools/stages/_inspect_medieval_overlay.png` — composite the
+   overlay on top of an 8×8 checkerboard of the saved tiles, scaled
+   so the overlay covers the full board. Confirms the detail reads
+   well against the floor it'll sit on.
+
+### 3.3 Frame reliability
 
 For the 48x48 atlas PNG:
 
@@ -169,13 +209,14 @@ For the 48x48 atlas PNG:
    stretched to the actual in-game size (`SQ_SIZE * 8 + 12 = 588px`)
    so we can confirm the joinery before shipping.
 
-### 3.3 Backdrop reliability
+### 3.4 Backdrop reliability
 
 For the 128x128 backdrop PNG:
 
 1. **Dimension assert**: `img.size == (128, 128)`.
 2. **Opacity assert**: fully opaque.
-3. **Edge-wrap fix**: same horizontal + vertical seam blend as tiles.
+3. **Edge-wrap fix**: per-axis seam blend (column 0 ↔ column 127, row
+   0 ↔ row 127, average + 1px feather).
 4. **Brightness clamp**: mean luminance must fall in `[0.18, 0.32]`
    (mid-dark range). Outside the range, multiply RGB until inside.
    Stops PixelLab from returning a too-bright backdrop that fights
@@ -190,80 +231,59 @@ For the 128x128 backdrop PNG:
 
 ### 4.1 SpriteFactory
 
-Extend [SpriteFactory.gd:218-231](../../godot/engine/SpriteFactory.gd#L218-L231):
+`tile_texture_for_stage(is_dark, stage)` ([SpriteFactory.gd:221](../../godot/engine/SpriteFactory.gd#L221))
+already does what we need — single light/dark per stage. The variant
+param was added during prototyping and stays as a no-op default (`0`)
+for forward-compatibility, but medieval ships single tiles so it's
+unused for this stage.
+
+Three helpers added next to it:
 
 ```gdscript
-static func tile_texture_for_stage(is_dark: bool, stage: String,
-                                   variant: int = 0) -> Texture2D:
-    var suffix := "_b" if variant == 1 else "_a"
-    var key := "tile:%s:%d:%d" % [stage, 1 if is_dark else 0, variant]
-    if _cache.has(key): return _cache[key]
-    var name := ("dark" if is_dark else "light") + suffix
-    var path := "%s/tiles/%s/%s.png" % [ASSET_ROOT, stage, name]
-    var tex := _load_single(path)
-    if tex == null:
-        # Fallback chain: medieval -> classic single tile.
-        tex = _load_single("%s/tiles/%s/%s.png" % [ASSET_ROOT, stage,
-            "dark" if is_dark else "light"])
-    if tex == null:
-        tex = _load_single("%s/tiles/classic/%s.png" % [ASSET_ROOT,
-            "dark" if is_dark else "light"])
-    _cache[key] = tex
-    return tex
+static func frame_texture_for_stage(stage: String) -> Texture2D
+static func backdrop_texture_for_stage(stage: String) -> Texture2D
+static func floor_overlay_texture_for_stage(stage: String) -> Texture2D
 ```
 
-`classic` and `moon` fall through to the single-tile fallback (their
-existing files), so this is backwards-compatible. `medieval` uses the
-new `_a`/`_b` files.
-
-Add two helpers:
-
-```gdscript
-static func frame_texture_medieval() -> Texture2D
-static func backdrop_texture_medieval() -> Texture2D
-```
-
-Each loads its single PNG and caches by name.
+Each loads its single PNG (paths from §1) and caches by name. Returns
+`null` for stages that don't have the asset (classic, moon) — callers
+check for null and skip the corresponding overlay layer.
 
 ### 4.2 GameScene
 
-Two surgical edits in [GameScene.gd](../../godot/scenes/GameScene.gd):
+Three surgical edits in [GameScene.gd](../../godot/scenes/GameScene.gd):
 
-**(a) Tile variant selection** — at lines 847-848, replace:
+**(a) Backdrop** — add a backdrop `TextureRect` as the FIRST child of
+the root `VBoxContainer` (so it sits behind everything else). Set
+`stretch_mode = STRETCH_TILE` so the 128×128 tile fills the viewport.
+Mouse filter ignore. Texture is set to the medieval backdrop only when
+`state.config.stage == "medieval"`; left null otherwise.
 
-```gdscript
-var stage := state.config.stage if state.config != null else "classic"
-bg.texture = SpriteFactory.tile_texture_for_stage(is_dark, stage)
-```
+**(b) Wood frame** — at lines 292-305, add a `NinePatchRect` driven by
+the wood atlas (only when stage is medieval). Patch margins = 16 on
+all sides. The existing dual-`ColorRect` flat frame stays in place for
+classic/moon.
 
-with:
+**(c) Floor overlay** — after the `GridContainer` is built and before
+`anim_overlay`, add a `TextureRect` that holds the floor overlay PNG,
+only when stage is medieval. `stretch_mode = STRETCH_KEEP_ASPECT_COVERED`,
+sized to fill `board_holder` (`SQ_SIZE * 8` square). Mouse filter
+ignore so clicks fall through to squares.
 
-```gdscript
-var stage := state.config.stage if state.config != null else "classic"
-var variant := ((f * 7 + r * 13) >> 1) & 1
-bg.texture = SpriteFactory.tile_texture_for_stage(is_dark, stage, variant)
-```
-
-**(b) Frame + backdrop** — replace the two flat `ColorRect` frames at
-lines 292-305 with a `NinePatchRect` driven by the wood atlas (only
-when stage == "medieval"; classic/moon keep the existing dual-ColorRect
-frame). Add a backdrop `TextureRect` as the FIRST child of the root
-VBox in `_build_ui()` so it sits behind everything else.
-
-The backdrop only renders when the stage is medieval; classic/moon get
-the existing flat viewport-clear background. This keeps the change
+The backdrop, frame, and overlay only render for medieval; classic
+and moon keep their existing flat backgrounds. This keeps the change
 purely additive — no change to the look of the existing two stages.
 
 ### 4.3 MainMenu
 
-Extend the stage picker at [MainMenu.gd:75-80](../../godot/scenes/MainMenu.gd#L75-L80):
+Extend the stage picker at [MainMenu.gd:71-81](../../godot/scenes/MainMenu.gd#L71-L81):
 
 ```gdscript
-opt.add_item("Medieval")
+opt.add_item("Medieval", 2)
 opt.set_item_metadata(2, "medieval")
 ```
 
-And update `_on_stage_selected` only if it lists explicit stage values.
+And update the `current` lookup so `"medieval"` selects index 2.
 
 ---
 
@@ -271,12 +291,15 @@ And update `_on_stage_selected` only if it lists explicit stage values.
 
 Before merging:
 
-1. All 6 PNGs present at the paths in §1, with dimensions matching exactly.
-2. The three `_inspect_medieval_*.png` visual-assertion images render
+1. All 5 PNGs present at the paths in §1, with dimensions matching
+   exactly.
+2. The four `_inspect_medieval_*.png` visual-assertion images render
    without visible seams or broken joinery.
 3. Booting the game with `stage = "medieval"` produces:
-   - 4 visually distinct but tonally coherent tile variants distributed
-     across the 8x8 board.
+   - Cohesive 8×8 floor of plain stone (light + dark tones, same
+     material).
+   - Macro detail (moss, cracks, dust, scuffs) scattered across the
+     board with no visible repetition.
    - A wood-framed border around the board, joinery clean at corners.
    - A tiling stone backdrop covering the entire viewport behind the
      side rails and top bar.
@@ -290,7 +313,7 @@ Before merging:
 ## 6. Run order
 
 ```powershell
-# 1. Generate the 6 atoms (cached, idempotent on rerun)
+# 1. Generate the 5 atoms (cached, idempotent on rerun)
 python tools/stages/gen_medieval.py
 
 # 2. Reload Godot — autoreimport picks up the new PNGs
@@ -299,5 +322,5 @@ python tools/stages/gen_medieval.py
 #    iterate prompts in gen_medieval.py if anything looks off
 ```
 
-`--force` to bypass the PixelLab cache. `--only tiles|frame|backdrop`
+`--force` to bypass the PixelLab cache. `--only tiles|overlay|frame|backdrop`
 to regenerate one group.

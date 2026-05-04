@@ -73,11 +73,17 @@ func _make_stage_picker() -> Control:
     opt.set_item_metadata(0, "classic")
     opt.add_item("Moon (debris)", 1)
     opt.set_item_metadata(1, "moon")
+    opt.add_item("Medieval", 2)
+    opt.set_item_metadata(2, "medieval")
     opt.custom_minimum_size = Vector2(180, 36)
     var current := "classic"
     if GameSettings.active_config != null and GameSettings.active_config.stage != "":
         current = GameSettings.active_config.stage
-    opt.select(1 if current == "moon" else 0)
+    var idx := 0
+    match current:
+        "moon": idx = 1
+        "medieval": idx = 2
+    opt.select(idx)
     opt.item_selected.connect(_on_stage_selected.bind(opt))
     row.add_child(opt)
     return row

@@ -218,17 +218,48 @@ static func aoe_resolve_frames(kind: String) -> Array:
 static func tile_texture(is_dark: bool) -> Texture2D:
 	return tile_texture_for_stage(is_dark, "classic")
 
-static func tile_texture_for_stage(is_dark: bool, stage: String) -> Texture2D:
-	var key := "tile:%s:%d" % [stage, 1 if is_dark else 0]
+static func tile_texture_for_stage(is_dark: bool, stage: String, variant: int = 0) -> Texture2D:
+	## Variant lets a stage ship a per-square _a/_b pair without breaking
+	## stages that only ship one tile per color. Resolution order:
+	##   1. <stage>/<color>_<a|b>.png         (variant-aware stage)
+	##   2. <stage>/<color>.png                (single-tile stage)
+	##   3. classic/<color>.png                (last-resort fallback)
+	var key := "tile:%s:%d:%d" % [stage, 1 if is_dark else 0, variant]
 	if _cache.has(key): return _cache[key]
-	var path := "%s/tiles/%s/%s.png" % [ASSET_ROOT, stage, "dark" if is_dark else "light"]
-	var tex := _load_single(path)
+	var color := "dark" if is_dark else "light"
+	var suffix := "_b" if variant == 1 else "_a"
+	var tex := _load_single("%s/tiles/%s/%s%s.png" % [ASSET_ROOT, stage, color, suffix])
 	if tex == null:
-		## Fallback to classic if a stage's assets are missing — keeps the
-		## board visible during partial asset rolls.
-		tex = _load_single("%s/tiles/classic/%s.png" % [ASSET_ROOT, "dark" if is_dark else "light"])
+		tex = _load_single("%s/tiles/%s/%s.png" % [ASSET_ROOT, stage, color])
+	if tex == null:
+		tex = _load_single("%s/tiles/classic/%s.png" % [ASSET_ROOT, color])
 	_cache[key] = tex
 	return tex
+
+
+# ===========================================================================
+# STAGE OVERLAYS — frame, viewport backdrop, board-sized detail layer.
+# Each helper returns null for stages that don't ship the asset; callers
+# treat null as "skip this layer for this stage."
+# ===========================================================================
+
+static func frame_texture_for_stage(stage: String) -> Texture2D:
+	var key := "frame:%s" % stage
+	if _cache.has(key): return _cache[key]
+	_cache[key] = _load_single("%s/ui/frame_%s.png" % [ASSET_ROOT, stage])
+	return _cache[key]
+
+static func backdrop_texture_for_stage(stage: String) -> Texture2D:
+	var key := "backdrop:%s" % stage
+	if _cache.has(key): return _cache[key]
+	_cache[key] = _load_single("%s/ui/backdrop_%s.png" % [ASSET_ROOT, stage])
+	return _cache[key]
+
+static func floor_overlay_texture_for_stage(stage: String) -> Texture2D:
+	var key := "floor_overlay:%s" % stage
+	if _cache.has(key): return _cache[key]
+	_cache[key] = _load_single("%s/ui/floor_overlay_%s.png" % [ASSET_ROOT, stage])
+	return _cache[key]
 
 # ===========================================================================
 # UI — energy segments, ability icons, drop shadow.

@@ -247,7 +247,32 @@ func _new_game() -> void:
 const SIDE_W := 224
 const TOP_BAR_H := 44
 
+## Resolve the active stage at chrome-build time. _build_ui() runs in
+## _ready() BEFORE _new_game() sets `state`, so we read directly from
+## the persisted active config; falls back to "classic" when missing
+## or unset, which means non-medieval stages keep the existing chrome.
+func _stage_id() -> String:
+	if GameSettings.active_config != null and GameSettings.active_config.stage != "":
+		return GameSettings.active_config.stage
+	return "classic"
+
+
 func _build_ui() -> void:
+	## Stage-aware backdrop — a tiling stone texture that fills the entire
+	## viewport behind the rest of the UI. Only added for stages that ship
+	## a backdrop asset (medieval); other stages keep the engine's flat
+	## viewport clear color. Added BEFORE the root VBox so it sits behind
+	## everything else.
+	var stage_for_chrome := _stage_id()
+	var backdrop_tex := SpriteFactory.backdrop_texture_for_stage(stage_for_chrome)
+	if backdrop_tex != null:
+		var backdrop := TextureRect.new()
+		backdrop.texture = backdrop_tex
+		backdrop.stretch_mode = TextureRect.STRETCH_TILE
+		backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(backdrop)
+
 	## Root layout — VBoxContainer with [top utility bar | main row].
 	var root := VBoxContainer.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -289,20 +314,36 @@ func _build_ui() -> void:
 	board_container.add_child(board_holder)
 
 	## Pixel-art bordered frame around the board for a "tabletop" feel.
-	var frame := ColorRect.new()
-	frame.color = Color(0.18, 0.13, 0.12)
-	frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	frame.offset_left = -6; frame.offset_top = -6
-	frame.offset_right = 6; frame.offset_bottom = 6
-	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	board_holder.add_child(frame)
-	var inner := ColorRect.new()
-	inner.color = Color(0.32, 0.22, 0.18)
-	inner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	inner.offset_left = -3; inner.offset_top = -3
-	inner.offset_right = 3; inner.offset_bottom = 3
-	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	board_holder.add_child(inner)
+	## Stages that ship a frame atlas (medieval) get a NinePatch with
+	## proper joinery; classic / moon keep the dual flat-ColorRect frame.
+	var frame_tex := SpriteFactory.frame_texture_for_stage(stage_for_chrome)
+	if frame_tex != null:
+		var frame_np := NinePatchRect.new()
+		frame_np.texture = frame_tex
+		frame_np.patch_margin_left = 16
+		frame_np.patch_margin_top = 16
+		frame_np.patch_margin_right = 16
+		frame_np.patch_margin_bottom = 16
+		frame_np.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		frame_np.offset_left = -16; frame_np.offset_top = -16
+		frame_np.offset_right = 16; frame_np.offset_bottom = 16
+		frame_np.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_holder.add_child(frame_np)
+	else:
+		var frame := ColorRect.new()
+		frame.color = Color(0.18, 0.13, 0.12)
+		frame.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		frame.offset_left = -6; frame.offset_top = -6
+		frame.offset_right = 6; frame.offset_bottom = 6
+		frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_holder.add_child(frame)
+		var inner := ColorRect.new()
+		inner.color = Color(0.32, 0.22, 0.18)
+		inner.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		inner.offset_left = -3; inner.offset_top = -3
+		inner.offset_right = 3; inner.offset_bottom = 3
+		inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_holder.add_child(inner)
 
 	board_grid = GridContainer.new()
 	board_grid.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -310,6 +351,19 @@ func _build_ui() -> void:
 	board_grid.add_theme_constant_override("h_separation", 0)
 	board_grid.add_theme_constant_override("v_separation", 0)
 	board_holder.add_child(board_grid)
+
+	## Floor overlay — a single board-sized transparent PNG carrying
+	## non-tiling macro detail (dust, scuffs) on top of the tile grid.
+	## Only added for stages that ship the asset. Translucent so the
+	## tile seams underneath remain visible through the detail pixels.
+	var overlay_tex := SpriteFactory.floor_overlay_texture_for_stage(stage_for_chrome)
+	if overlay_tex != null:
+		var floor_overlay := TextureRect.new()
+		floor_overlay.texture = overlay_tex
+		floor_overlay.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+		floor_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		floor_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		board_holder.add_child(floor_overlay)
 
 	anim_overlay = Control.new()
 	anim_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
